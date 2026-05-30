@@ -54,18 +54,27 @@ func main() {
 	// 	log.Fatalf("reading positions failed: %v", err)
 	// }
 
-	symbol := "ETHUSDT"
-	size, err := client.GetPositionSize(context.Background(), symbol)
+	err = client.SyncShort(context.Background(), "ETHUSDT", 0.1, 0.001, true)
 	if err != nil {
-		log.Fatalf("reading position failed: %v", err)
+		log.Fatalf("sync failed: %v", err)
 	}
 
-	switch {
-	case size < 0:
-		log.Printf("%s position: SHORT %.2f", symbol, -size)
-	case size > 0:
-		log.Printf("%s position: LONG %.2f", symbol, size)
-	default:
-		log.Printf("%s position: flat (none open)", symbol)
+	open, err := client.GetOpenPositions(context.Background())
+	if err != nil {
+		log.Fatalf("reading positions failed: %v", err)
+	}
+
+	if len(open) == 0 {
+		log.Println("No open positions.")
+	}
+	for _, p := range open {
+		side := "LONG"
+		amount := p.Size
+		if p.Size < 0 {
+			side = "SHORT"
+			amount = -p.Size
+		}
+		log.Printf("%s: %s %.2f | entry %.2f mark %.2f PnL %.2f",
+			p.Symbol, side, amount, p.EntryPrice, p.MarkPrice, p.UnrealizedPnL)
 	}
 }

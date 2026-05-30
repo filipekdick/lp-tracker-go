@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 
 	"github.com/adshao/go-binance/v2/futures"
@@ -13,6 +14,17 @@ import (
 // program does not need to know the library's internal details.
 type Client struct {
 	futures *futures.Client
+}
+
+// Position is one open futures position in our simple form.
+// Position is one open futures position in our own simple form.
+type Position struct {
+	Symbol           string
+	Size             float64 // negative = short, positive = long
+	EntryPrice       float64
+	MarkPrice        float64
+	UnrealizedPnL    float64
+	LiquidationPrice float64
 }
 
 // Side tells Binance whether we are buying or selling.
@@ -37,6 +49,30 @@ func (c *Client) Ping(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("Could not reach Binance: %w", err)
 	}
 	return serverTime, nil
+}
+
+// parseFloatOrZero parses a Binance numeric string, returning 0 if it can't.
+func parseFloatOrZero(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// GetQuantityPrecision returns how many decimal place Binance allows
+// for order quantities on this symbol
+func (c *Client) GetQuantityPrecision(ctx context.Context, symbol string) (int, error) {
+	info, err := c.futures.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("Could not read exchange info: %w", err)
+	}
+	for _, s := range info.Symbols {
+		if s.Symbol == symbol {
+			return s.QuantityPrecision, nil
+		}
+	}
+	return 0, fmt.Errorf("symbol %s not found in exchange info", symbol)
 }
 
 // GetBalances reads all asset balances in the futures acccount.
@@ -75,6 +111,33 @@ func (c *Client) GetPositionSize(ctx context.Context, symbol string) (float64, e
 		return size, nil
 	}
 	return 0, nil
+}
+
+// GetOpenPositions returns every position with a non-zero size.
+func (c *Client) GetOpenPositions(ctx context.Context) ([]Position, error) {
+	raw, err := c.GetPositions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var open []Position
+	for _, p := range raw {
+		size, err := strconv.ParseFloat(p.PositionAmt, 64)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse size for %s: %w", p.Symbol, err)
+		}
+		if size != 0 {
+			open = append(open, Position{
+				Symbol:           p.Symbol,
+				Size:             size,
+				EntryPrice:       parseFloatOrZero(p.EntryPrice),
+				MarkPrice:        parseFloatOrZero(p.MarkPrice),
+				UnrealizedPnL:    parseFloatOrZero(p.UnRealizedProfit),
+				LiquidationPrice: parseFloatOrZero(p.LiquidationPrice),
+			})
+		}
+	}
+	return open, nil
 }
 
 // PlaceMarketOrder places a market order. When dryRun is true it validates
@@ -127,4 +190,44 @@ func (c *Client) PlaceMarketOrder(
 		return nil, fmt.Errorf("placing order failed: %w", err)
 	}
 	return order, nil
+}
+
+// SynchShort maker our short in 'simbol' match 'TargetShort' base-asset units.
+// A positive targetShort means "be short this much"; zero means "be flat".
+// It only trades when the gap is at least 'minChange', to avoid churn on noise.
+func (c *Client) SyncShort(
+	ctx context.Context, symbol string, targetShort,
+	minChange float64, dryRun bool) error {
+	if targetShort < 0 {
+		return fmt.Errorf("targetShort must be zero or positive, got %v", targetShort)
+	}
+
+	current, err := c.GetPositionSize(ctx, symbol)
+	if err != nil {
+		return err
+	}
+
+	desired := -targetShort    //a short is stored as a negative size
+	delta := desired - current //signed gap: how far, and which way, to move
+
+	if math.Abs(delta) < minChange {
+		log.Printf("%s: within tolerance (short %.2f, target %.2f), no order", symbol, -current, targetShort)
+		return nil
+	}
+
+	side := SideSell //delta <0 means we need a bigger short, so sell more
+	reduceOnly := false
+	if delta > 0 { //delta > 0 means we are short too short, so buy some back
+		side = SideBuy
+		reduceOnly = true
+	}
+
+	precision, err := c.GetQuantityPrecision(ctx, symbol)
+	if err != nil {
+		return err
+	}
+
+	quantity := strconv.FormatFloat(math.Abs(delta), 'f', precision, 64)
+	_, err = c.PlaceMarketOrder(ctx, symbol, side, quantity, reduceOnly, dryRun)
+	return err
 }
