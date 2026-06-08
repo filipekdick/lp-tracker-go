@@ -74,7 +74,7 @@ func main() {
 			side = "SHORT"
 			amount = -p.Size
 		}
-		log.Printf("%s: %s %.2f | entry %.2f mark %.2f PnL %.2f",
+		log.Printf("%s: %s %.3f | entry %.2f mark %.2f PnL %.2f",
 			p.Symbol, side, amount, p.EntryPrice, p.MarkPrice, p.UnrealizedPnL)
 	}
 }
