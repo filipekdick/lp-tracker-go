@@ -33,6 +33,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/pools", s.handlePools)
 	mux.HandleFunc("/api/pools/", s.handlePoolDetail)
+	mux.HandleFunc("/api/position", s.handlePosition)
 	mux.HandleFunc("/api/scan", s.handleScan)
 
 	if s.static != nil {
@@ -128,6 +129,16 @@ func (s *Server) handlePoolDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "pool not found"})
+}
+
+// handlePosition serves the currently tracked LP position and its hedge.
+func (s *Server) handlePosition(w http.ResponseWriter, _ *http.Request) {
+	pos := s.scanner.Snapshot().Position
+	if pos == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"tracking": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tracking": true, "position": pos})
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {

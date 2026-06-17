@@ -30,6 +30,16 @@
 
   <section class="summary" id="summary"></section>
 
+  <section class="tracked" id="tracked" hidden>
+    <div class="tracked-head">
+      <h2>Tracked position &amp; hedge</h2>
+      <span class="tracked-sub" id="tracked-sub"></span>
+    </div>
+    <div class="tracked-grid" id="tracked-grid"></div>
+  </section>
+
+  <h2 class="section-title">Most profitable pools by chain</h2>
+
   <section class="controls">
     <div class="filter-group" id="kind-filters">
       <button class="chip active" data-kind="">All layers</button>
@@ -41,6 +51,11 @@
       <button class="chip v-attractive" data-verdict="attractive">Attractive</button>
       <button class="chip v-fair" data-verdict="fair">Fair</button>
       <button class="chip v-unattractive" data-verdict="unattractive">Unattractive</button>
+    </div>
+    <div class="filter-group">
+      <select id="protocol-filter" title="Filter by protocol">
+        <option value="">All protocols</option>
+      </select>
     </div>
     <div class="filter-group grow">
       <input type="search" id="search" placeholder="Filter by token, pool or chain…" />
@@ -59,6 +74,7 @@
             <th data-sort="feeApr" class="num">Fee APR</th>
             <th data-sort="realizedVol" class="num">Realized σ</th>
             <th data-sort="feeImpliedVol" class="num">Fee-implied σ</th>
+            <th data-sort="netEdge" class="num">Net edge</th>
             <th data-sort="ratio" class="num">Fee/Vol</th>
             <th data-sort="verdict">Verdict</th>
           </tr>

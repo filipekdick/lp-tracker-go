@@ -25,10 +25,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
 
 	"github.com/filipekdick/lp-tracker-go/internal/api"
+	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/lp"
+	"github.com/filipekdick/lp-tracker-go/internal/position"
 	"github.com/filipekdick/lp-tracker-go/internal/scanner"
 	"github.com/filipekdick/lp-tracker-go/web"
 )
@@ -46,7 +50,12 @@ func main() {
 	log.Printf("data source: %s | %d chains | %d pools/chain | scan every %s",
 		source.Name(), len(cfg.Chains), cfg.PerChain, cfg.Interval)
 
-	sc := scanner.New(cfg, source, implied)
+	tracker := buildTracker(source, implied)
+	if tracker != nil {
+		log.Printf("position tracking: %s | token ID %d", tracker.Name(), envInt64("TRACK_TOKEN_ID", defaultTokenID))
+	}
+
+	sc := scanner.New(cfg, source, implied, tracker)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -82,6 +91,54 @@ func buildSources() (datasource.Source, datasource.ImpliedVolSource) {
 	default:
 		return datasource.NewDemo(time.Now().UnixNano()), datasource.DemoImpliedVol{}
 	}
+}
+
+// Aerodrome (Base) contract addresses for the on-chain position reader, and the
+// default position to track.
+const (
+	aeroNFPMAddress    = "0x827922686190790b37229fd06084350E74485b72"
+	aeroFactoryAddress = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+	defaultTokenID     = 71002035
+)
+
+// buildTracker builds the single-position tracker. In demo mode it synthesises
+// a position; in live mode it reads an Aerodrome position on Base from RPC,
+// prices it via GeckoTerminal, pulls implied vol from Deribit and (optionally)
+// reads the Binance hedge. A misconfigured live tracker degrades to the demo
+// tracker rather than crashing the server.
+func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource) position.Tracker {
+	tokenID := envInt64("TRACK_TOKEN_ID", defaultTokenID)
+
+	if strings.ToLower(envStr("DATA_SOURCE", "demo")) != "live" {
+		return position.NewDemoTracker(tokenID)
+	}
+
+	rpcURL := os.Getenv("RPC_URL")
+	gecko, okGecko := source.(*datasource.GeckoTerminal)
+	if rpcURL == "" || !okGecko {
+		log.Println("live position tracking needs RPC_URL and the live data source; using demo tracker")
+		return position.NewDemoTracker(tokenID)
+	}
+
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		log.Printf("could not dial RPC for position tracking (%v); using demo tracker", err)
+		return position.NewDemoTracker(tokenID)
+	}
+
+	reader := lp.NewReader(client, aeroNFPMAddress, aeroFactoryAddress)
+
+	// Binance hedge is optional: without keys the hedge is advisory.
+	var bn *binance.Client
+	apiKey := envStr("BINANCE_TESTNET_API_KEY", os.Getenv("BINANCE_API_KEY"))
+	apiSecret := envStr("BINANCE_TESTNET_API_SECRET", os.Getenv("BINANCE_API_SECRET"))
+	if apiKey != "" && apiSecret != "" {
+		bn = binance.Connect(apiKey, apiSecret)
+	}
+
+	base := datasource.Chain{Slug: "base", Display: "Base", Kind: datasource.L2}
+	dryRun := envStr("HEDGE_DRY_RUN", "true") != "false"
+	return position.NewLiveTracker(reader, gecko, implied, bn, tokenID, base, dryRun)
 }
 
 // resolveChains maps a comma-separated slug list onto the known chain set,
@@ -120,6 +177,15 @@ func envStr(key, def string) string {
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envInt64(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
 	}

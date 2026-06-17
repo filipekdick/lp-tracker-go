@@ -6,10 +6,12 @@
 const state = {
   pools: [],
   meta: null,
+  position: null,
   nextScan: null,
-  filters: { kind: "", verdict: "", search: "" },
+  filters: { kind: "", verdict: "", protocol: "", search: "" },
   sort: { key: "score", dir: -1 },
   selected: null, // "chainSlug/address"
+  protocolsSeen: new Set(),
 };
 
 const fmt = {
@@ -36,6 +38,14 @@ const fmt = {
     if (n >= 0.01) return n.toFixed(4);
     return n.toPrecision(3);
   },
+  amount(n) {
+    if (n == null) return "—";
+    const abs = Math.abs(n);
+    if (abs >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (abs >= 1) return n.toFixed(3);
+    if (abs >= 0.0001) return n.toFixed(5);
+    return n.toPrecision(3);
+  },
 };
 
 async function getJSON(url, opts) {
@@ -46,15 +56,19 @@ async function getJSON(url, opts) {
 
 async function refresh() {
   try {
-    const [meta, poolsResp] = await Promise.all([
+    const [meta, poolsResp, posResp] = await Promise.all([
       getJSON("/api/meta"),
       getJSON("/api/pools"),
+      getJSON("/api/position").catch(() => ({ tracking: false })),
     ]);
     state.meta = meta;
     state.pools = poolsResp.pools || [];
+    state.position = posResp && posResp.tracking ? posResp.position : null;
     state.nextScan = poolsResp.nextScan ? new Date(poolsResp.nextScan) : null;
     renderStatus(meta, poolsResp);
     renderSummary(meta);
+    renderPosition();
+    syncProtocolFilter();
     renderTable();
     if (state.selected) renderDetail(findSelected());
   } catch (e) {
@@ -84,6 +98,98 @@ function renderSummary(meta) {
     .join("");
 }
 
+// ---- tracked position panel ------------------------------------------------
+
+function kv(k, v) { return `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`; }
+
+function renderPosition() {
+  const section = document.getElementById("tracked");
+  const p = state.position;
+  if (!p) { section.hidden = true; return; }
+  section.hidden = false;
+
+  document.getElementById("tracked-sub").innerHTML =
+    `${p.protocol} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · token #${p.tokenId}`
+    + (p.error ? ` · <span style="color:var(--red)">${p.error}</span>` : "");
+
+  const a = p.analysis || {};
+  const h = p.hedge || {};
+
+  // LP card.
+  const rangePill = p.inRange ? '<span class="pill in">in range</span>' : '<span class="pill out">out of range</span>';
+  const lp = `<div class="tcard">
+    <h3>Liquidity position ${rangePill}</h3>
+    ${kv("Pool", p.poolName + " · " + fmt.pct(p.feeTier))}
+    ${kv(p.symbol0, fmt.amount(p.amount0))}
+    ${kv(p.symbol1, fmt.amount(p.amount1))}
+    ${kv("Position value", fmt.usd(p.valueUsd))}
+    ${kv("Pool TVL / Vol 24h", fmt.usd(p.tvlUsd) + " / " + fmt.usd(p.volume24hUsd))}
+    ${kv("Tick range", p.tickLower + " … " + p.tickUpper + " (now " + p.tickNow + ")")}
+  </div>`;
+
+  // Hedge card.
+  let hedgeBody;
+  if (!h.available && !h.symbol) {
+    hedgeBody = `<p class="hint">${h.note || "No hedgeable leg."}</p>`;
+  } else {
+    const syncPill = h.inSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">drift</span>';
+    const pnlCls = (h.unrealizedPnl || 0) >= 0 ? "ratio-pos" : "ratio-neg";
+    hedgeBody = `${kv("Venue / perp", h.venue + " · " + h.symbol)}
+      ${kv("LP exposure", fmt.amount(h.lpExposure) + " " + h.exposureSymbol)}
+      ${kv("Target short", fmt.amount(h.targetShort) + " " + h.exposureSymbol)}
+      ${kv("Current short", h.available ? fmt.amount(h.currentShort) + " " + h.exposureSymbol : "—")}
+      ${kv("Drift", h.available ? fmt.amount(h.drift) : "—")}
+      ${kv("Entry / mark", (h.entryPrice ? fmt.price(h.entryPrice) : "—") + " / " + (h.markPrice ? fmt.price(h.markPrice) : "—"))}
+      ${kv("Short PnL", `<span class="${pnlCls}">${h.available ? fmt.usd(h.unrealizedPnl) : "—"}</span>`)}`;
+  }
+  const hedge = `<div class="tcard">
+    <h3>Perp short hedge ${h.inSync != null && h.symbol ? (h.inSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">rebalance</span>') : ""}</h3>
+    ${hedgeBody}
+    ${h.note ? `<p class="hint" style="margin-top:8px">${h.dryRun ? "🔒 dry-run · " : ""}${h.note}</p>` : ""}
+  </div>`;
+
+  // Fee-vs-volatility card with comparison bars.
+  const vols = [
+    { label: "Fee-implied σ", val: a.feeImpliedVol, cls: "fees" },
+    { label: "Realized σ", val: a.realizedVol, cls: "realized" },
+  ];
+  if (a.hasImplied) vols.push({ label: "Deribit IV", val: a.impliedVol, cls: "implied" });
+  const maxVol = Math.max(...vols.map((v) => v.val || 0), 0.0001);
+  const verdictCls = a.verdict || "unknown";
+  const fee = `<div class="tcard">
+    <h3>Fees vs. volatility <span class="verdict ${verdictCls}">${a.verdict || "—"}</span></h3>
+    ${kv("Fee APR", fmt.pct(a.feeApr))}
+    ${kv("Net edge APR", `<span class="${(a.netEdgeApr||0)>=0?"ratio-pos":"ratio-neg"}">${fmt.pct(a.netEdgeApr)}</span>`)}
+    <div class="bars" style="margin-top:10px">
+      ${vols.map((v) => `<div class="bar-row">
+        <span class="label">${v.label}</span>
+        <span class="bar-track"><span class="bar-fill ${v.cls}" style="width:${Math.max(2,(v.val/maxVol)*100)}%"></span></span>
+        <span class="val">${fmt.pct(v.val)}</span></div>`).join("")}
+    </div>
+  </div>`;
+
+  document.getElementById("tracked-grid").innerHTML = lp + hedge + fee;
+}
+
+function syncProtocolFilter() {
+  const sel = document.getElementById("protocol-filter");
+  let changed = false;
+  for (const p of state.pools) {
+    if (p.protocol && !state.protocolsSeen.has(p.protocol)) {
+      state.protocolsSeen.add(p.protocol);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  // Put the focus protocols first, then the rest alphabetically.
+  const focus = ["Aerodrome", "Velodrome", "PancakeSwap", "Uniswap"];
+  const rest = [...state.protocolsSeen].filter((p) => !focus.includes(p)).sort();
+  const ordered = [...focus.filter((p) => state.protocolsSeen.has(p)), ...rest];
+  const cur = state.filters.protocol;
+  sel.innerHTML = '<option value="">All protocols</option>' +
+    ordered.map((p) => `<option value="${p}"${p === cur ? " selected" : ""}>${p}</option>`).join("");
+}
+
 function countdown() {
   const el = document.getElementById("scan-label");
   if (!state.nextScan) {
@@ -111,6 +217,7 @@ function sortKey(p) {
     case "feeApr": return p.analysis.feeApr;
     case "realizedVol": return p.analysis.realizedVol;
     case "feeImpliedVol": return p.analysis.feeImpliedVol;
+    case "netEdge": return p.analysis.netEdgeApr;
     case "ratio": return p.analysis.feeYieldRatio;
     case "verdict": return p.analysis.verdict;
     default: return p.analysis.score;
@@ -122,6 +229,7 @@ function visiblePools() {
   let pools = state.pools.filter((p) => {
     if (f.kind && p.chainKind !== f.kind) return false;
     if (f.verdict && p.analysis.verdict !== f.verdict) return false;
+    if (f.protocol && p.protocol !== f.protocol) return false;
     if (f.search) {
       const hay = (p.name + " " + p.chain + " " + p.dex + " " + p.baseSymbol + " " + p.quoteSymbol).toLowerCase();
       if (!hay.includes(f.search.toLowerCase())) return false;
@@ -148,15 +256,17 @@ function renderTable() {
     .map((p) => {
       const a = p.analysis;
       const ratioCls = a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg";
+      const edgeCls = a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg";
       const sel = poolId(p) === state.selected ? " selected" : "";
       return `<tr class="row${sel}" data-id="${poolId(p)}">
-        <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.dex}</span></div></td>
+        <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.protocol || p.dex}</span></div></td>
         <td><span class="chain-tag">${p.chain}<span class="layer ${p.chainKind}">${p.chainKind}</span></span></td>
         <td class="num">${fmt.usd(p.tvlUsd)}</td>
         <td class="num">${fmt.usd(p.volume24hUsd)}</td>
         <td class="num">${fmt.pct(a.feeApr)}</td>
         <td class="num">${fmt.pct(a.realizedVol)}</td>
         <td class="num">${fmt.pct(a.feeImpliedVol)}</td>
+        <td class="num ${edgeCls}">${fmt.pct(a.netEdgeApr)}</td>
         <td class="num ${ratioCls}">${fmt.ratio(a.feeYieldRatio)}</td>
         <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
       </tr>`;
@@ -282,6 +392,10 @@ function wireControls() {
   });
   document.getElementById("search").addEventListener("input", (e) => {
     state.filters.search = e.target.value;
+    renderTable();
+  });
+  document.getElementById("protocol-filter").addEventListener("change", (e) => {
+    state.filters.protocol = e.target.value;
     renderTable();
   });
   document.querySelectorAll("thead th[data-sort]").forEach((th) => {

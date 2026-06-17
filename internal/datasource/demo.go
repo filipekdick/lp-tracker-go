@@ -111,6 +111,7 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 		ChainKind:      chain.Kind,
 		Address:        d.fakeAddress(chain.Slug),
 		DEX:            dex,
+		Protocol:       ProtocolFamily(dex),
 		Name:           fmt.Sprintf("%s / %s", base.symbol, quote.symbol),
 		BaseSymbol:     base.symbol,
 		QuoteSymbol:    quote.symbol,
@@ -163,7 +164,7 @@ type DemoImpliedVol struct{}
 
 // ImpliedVol returns a plausible options-implied vol for major assets.
 func (DemoImpliedVol) ImpliedVol(_ context.Context, symbol string) (float64, bool) {
-	switch normalizeSymbol(symbol) {
+	switch NormalizeSymbol(symbol) {
 	case "BTC":
 		return 0.48, true
 	case "ETH":

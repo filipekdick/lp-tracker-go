@@ -1,0 +1,55 @@
+package position
+
+import (
+	"context"
+	"testing"
+)
+
+func TestHedgeLegPicksVolatileLeg(t *testing.T) {
+	// WETH/USDC -> hedge WETH on ETHUSDT.
+	asset, amt, perp, ok := hedgeLeg("WETH", "USDC", 4.2, 14000)
+	if !ok || asset != "WETH" || perp != "ETHUSDT" || amt != 4.2 {
+		t.Fatalf("got asset=%q amt=%v perp=%q ok=%v", asset, amt, perp, ok)
+	}
+
+	// Order shouldn't matter: USDC/WETH still hedges the WETH leg.
+	asset, amt, perp, ok = hedgeLeg("USDC", "WETH", 14000, 4.2)
+	if !ok || asset != "WETH" || perp != "ETHUSDT" || amt != 4.2 {
+		t.Fatalf("reversed: got asset=%q amt=%v perp=%q ok=%v", asset, amt, perp, ok)
+	}
+}
+
+func TestHedgeLegUnhedgeablePool(t *testing.T) {
+	// Two stablecoins -> nothing to hedge.
+	if _, _, _, ok := hedgeLeg("USDC", "DAI", 1, 1); ok {
+		t.Fatal("stable/stable pool should not be hedgeable")
+	}
+	// Unknown alt with no perp listing -> not hedgeable.
+	if _, _, _, ok := hedgeLeg("FOO", "USDC", 1, 1); ok {
+		t.Fatal("alt without a perp should not be hedgeable")
+	}
+}
+
+func TestDemoTrackerIsConsistent(t *testing.T) {
+	tp, err := NewDemoTracker(71002035).Track(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.Protocol != "Aerodrome" || tp.ChainSlug != "base" {
+		t.Fatalf("expected Aerodrome on base, got %s on %s", tp.Protocol, tp.ChainSlug)
+	}
+	if tp.Hedge.Symbol != "ETHUSDT" || tp.Hedge.ExposureSymbol != "WETH" {
+		t.Fatalf("unexpected hedge: %+v", tp.Hedge)
+	}
+	// Target short should equal the WETH leg held in the LP.
+	if tp.Hedge.TargetShort != tp.Amount0 {
+		t.Fatalf("target short %v should match WETH amount %v", tp.Hedge.TargetShort, tp.Amount0)
+	}
+	// The analysis should have run and produced a fee-implied volatility.
+	if tp.Analysis.FeeImpliedVol <= 0 {
+		t.Fatalf("expected positive fee-implied vol, got %v", tp.Analysis.FeeImpliedVol)
+	}
+	if !tp.Analysis.HasImplied {
+		t.Fatal("expected Deribit/demo implied vol for an ETH pool")
+	}
+}

@@ -6,7 +6,10 @@
 // offline development.
 package datasource
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // ChainKind distinguishes settlement layers.
 type ChainKind string
@@ -38,23 +41,75 @@ var DefaultChains = []Chain{
 
 // RawPool is one pool's market data as returned by a Source, before analysis.
 type RawPool struct {
-	Chain        string    `json:"chain"`        // display name
-	ChainSlug    string    `json:"chainSlug"`    // provider slug
-	ChainKind    ChainKind `json:"chainKind"`    // L1 / L2
-	Address      string    `json:"address"`      // pool contract address
-	DEX          string    `json:"dex"`          // exchange name
-	Name         string    `json:"name"`         // e.g. "WETH / USDC"
-	BaseSymbol   string    `json:"baseSymbol"`   // volatile asset symbol
-	QuoteSymbol  string    `json:"quoteSymbol"`  // quote asset symbol
-	FeeTier      float64   `json:"feeTier"`      // fractional fee (0.003 == 0.3%)
-	TVLUSD       float64   `json:"tvlUsd"`       // total value locked
-	Volume24hUSD float64   `json:"volume24hUsd"` // trailing 24h volume
-	PriceUSD     float64   `json:"priceUsd"`     // current base price in USD
+	Chain         string    `json:"chain"`         // display name
+	ChainSlug     string    `json:"chainSlug"`     // provider slug
+	ChainKind     ChainKind `json:"chainKind"`     // L1 / L2
+	Address       string    `json:"address"`       // pool contract address
+	DEX           string    `json:"dex"`           // raw exchange id (e.g. "aerodrome_slipstream")
+	Protocol      string    `json:"protocol"`      // normalised family (e.g. "Aerodrome")
+	Name          string    `json:"name"`          // e.g. "WETH / USDC"
+	BaseSymbol    string    `json:"baseSymbol"`    // volatile asset symbol
+	QuoteSymbol   string    `json:"quoteSymbol"`   // quote asset symbol
+	FeeTier       float64   `json:"feeTier"`       // fractional fee (0.003 == 0.3%)
+	TVLUSD        float64   `json:"tvlUsd"`        // total value locked
+	Volume24hUSD  float64   `json:"volume24hUsd"`  // trailing 24h volume
+	PriceUSD      float64   `json:"priceUsd"`      // current base price in USD
+	QuotePriceUSD float64   `json:"quotePriceUsd"` // current quote price in USD
 
 	// Closes holds historical base-asset close prices, oldest first, used to
 	// measure realised volatility. PeriodsPerYear records their sampling rate.
 	Closes         []float64 `json:"closes"`
 	PeriodsPerYear float64   `json:"periodsPerYear"`
+}
+
+// ProtocolFamily normalises a provider DEX id into a human-readable protocol
+// family, so e.g. "aerodrome_slipstream" -> "Aerodrome" and "uniswap_v3" ->
+// "Uniswap". Unknown ids are title-cased best-effort.
+func ProtocolFamily(dex string) string {
+	d := strings.ToLower(dex)
+	switch {
+	case strings.Contains(d, "aerodrome"):
+		return "Aerodrome"
+	case strings.Contains(d, "velodrome"):
+		return "Velodrome"
+	case strings.Contains(d, "pancake"):
+		return "PancakeSwap"
+	case strings.Contains(d, "uniswap"):
+		return "Uniswap"
+	case strings.Contains(d, "sushi"):
+		return "SushiSwap"
+	case strings.Contains(d, "curve"):
+		return "Curve"
+	case strings.Contains(d, "camelot"):
+		return "Camelot"
+	case strings.Contains(d, "quickswap"):
+		return "QuickSwap"
+	case strings.Contains(d, "thena"):
+		return "Thena"
+	case strings.Contains(d, "trader_joe") || strings.Contains(d, "traderjoe"):
+		return "Trader Joe"
+	case strings.Contains(d, "pharaoh"):
+		return "Pharaoh"
+	case strings.Contains(d, "orca"):
+		return "Orca"
+	case strings.Contains(d, "raydium"):
+		return "Raydium"
+	case strings.Contains(d, "meteora"):
+		return "Meteora"
+	}
+	if d == "" {
+		return "Unknown"
+	}
+	// Fallback: drop a trailing version suffix and title-case.
+	d = strings.TrimRight(d, "0123456789_")
+	d = strings.ReplaceAll(d, "_", " ")
+	parts := strings.Fields(d)
+	for i, p := range parts {
+		if p != "" {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // Source returns the most active pools for a set of chains.

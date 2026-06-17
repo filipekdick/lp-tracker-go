@@ -5,12 +5,14 @@ package scanner
 
 import (
 	"context"
+	"log"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/position"
 )
 
 // Config controls a scan cycle.
@@ -28,13 +30,14 @@ type AnalyzedPool struct {
 
 // Snapshot is an immutable view of the most recent scan.
 type Snapshot struct {
-	Pools      []AnalyzedPool `json:"pools"`
-	Source     string         `json:"source"`
-	LastScan   time.Time      `json:"lastScan"`
-	NextScan   time.Time      `json:"nextScan"`
-	Scanning   bool           `json:"scanning"`
-	DurationMS int64          `json:"durationMs"`
-	Error      string         `json:"error,omitempty"`
+	Pools      []AnalyzedPool            `json:"pools"`
+	Position   *position.TrackedPosition `json:"position,omitempty"`
+	Source     string                    `json:"source"`
+	LastScan   time.Time                 `json:"lastScan"`
+	NextScan   time.Time                 `json:"nextScan"`
+	Scanning   bool                      `json:"scanning"`
+	DurationMS int64                     `json:"durationMs"`
+	Error      string                    `json:"error,omitempty"`
 }
 
 // Scanner owns the scan loop and the latest snapshot.
@@ -42,6 +45,7 @@ type Scanner struct {
 	cfg     Config
 	source  datasource.Source
 	implied datasource.ImpliedVolSource
+	tracker position.Tracker
 
 	mu   sync.RWMutex
 	snap Snapshot
@@ -49,8 +53,9 @@ type Scanner struct {
 	trigger chan struct{}
 }
 
-// New builds a Scanner. implied may be nil to skip options-implied volatility.
-func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSource) *Scanner {
+// New builds a Scanner. implied may be nil to skip options-implied volatility,
+// and tracker may be nil to disable single-position tracking.
+func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSource, tracker position.Tracker) *Scanner {
 	if cfg.PerChain <= 0 {
 		cfg.PerChain = 10
 	}
@@ -64,6 +69,7 @@ func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSour
 		cfg:     cfg,
 		source:  source,
 		implied: implied,
+		tracker: tracker,
 		snap:    Snapshot{Source: source.Name()},
 		trigger: make(chan struct{}, 1),
 	}
@@ -115,6 +121,9 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 
 	raw, err := s.source.TopPools(ctx, s.cfg.Chains, s.cfg.PerChain)
 
+	// Refresh the tracked position alongside the market scan.
+	tracked := s.trackPosition(ctx)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -123,6 +132,9 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 	s.snap.NextScan = s.snap.LastScan.Add(s.cfg.Interval)
 	s.snap.DurationMS = time.Since(start).Milliseconds()
 	s.snap.Source = s.source.Name()
+	if tracked != nil {
+		s.snap.Position = tracked
+	}
 
 	if err != nil {
 		s.snap.Error = err.Error()
@@ -130,6 +142,27 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 	}
 	s.snap.Error = ""
 	s.snap.Pools = s.analyze(ctx, raw)
+}
+
+// trackPosition refreshes the tracked LP/hedge, returning nil when no tracker
+// is configured. A tracking failure is logged but does not abort the scan; the
+// previous snapshot's position is retained.
+func (s *Scanner) trackPosition(ctx context.Context) *position.TrackedPosition {
+	if s.tracker == nil {
+		return nil
+	}
+	tp, err := s.tracker.Track(ctx)
+	if err != nil {
+		log.Printf("[scanner] position tracking failed: %v", err)
+		s.mu.RLock()
+		prev := s.snap.Position
+		s.mu.RUnlock()
+		if prev != nil {
+			return prev
+		}
+		return &position.TrackedPosition{Source: s.tracker.Name(), Error: err.Error()}
+	}
+	return &tp
 }
 
 // analyze runs the model over every raw pool and returns the results sorted by

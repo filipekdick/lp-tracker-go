@@ -17,15 +17,16 @@ import (
 
 // PositionReport bundles everything we want to know about a position.
 type PositionReport struct {
-	TokenID   int64
-	Symbol0   string
-	Symbol1   string
-	Amount0   float64
-	Amount1   float64
-	TickLower int64
-	TickUpper int64
-	TickNow   int64
-	InRange   bool
+	TokenID     int64
+	PoolAddress string
+	Symbol0     string
+	Symbol1     string
+	Amount0     float64
+	Amount1     float64
+	TickLower   int64
+	TickUpper   int64
+	TickNow     int64
+	InRange     bool
 }
 
 // Reader reades a LP position from one protocol, given its contract addresses.
@@ -91,15 +92,16 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 	tickUpper := position.TickUpper.Int64()
 
 	return PositionReport{
-		TokenID:   tokenID,
-		Symbol0:   sym0,
-		Symbol1:   sym1,
-		Amount0:   format.TokenAmount(amount0, dec0),
-		Amount1:   format.TokenAmount(amount1, dec1),
-		TickLower: tickLower,
-		TickUpper: tickUpper,
-		TickNow:   tickNow,
-		InRange:   tickNow >= tickLower && tickNow <= tickUpper,
+		TokenID:     tokenID,
+		PoolAddress: poolAddr.Hex(),
+		Symbol0:     sym0,
+		Symbol1:     sym1,
+		Amount0:     format.TokenAmount(amount0, dec0),
+		Amount1:     format.TokenAmount(amount1, dec1),
+		TickLower:   tickLower,
+		TickUpper:   tickUpper,
+		TickNow:     tickNow,
+		InRange:     tickNow >= tickLower && tickNow <= tickUpper,
 	}, nil
 }
 

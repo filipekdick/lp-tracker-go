@@ -52,8 +52,9 @@ var deribitCurrencies = map[string]string{
 	"ETH": "ETH",
 }
 
-// normalizeSymbol strips common wrapper/bridge prefixes so e.g. WETH -> ETH.
-func normalizeSymbol(symbol string) string {
+// NormalizeSymbol strips common wrapper/bridge prefixes so e.g. WETH -> ETH and
+// WBTC -> BTC, mapping a pool token symbol to its underlying asset.
+func NormalizeSymbol(symbol string) string {
 	s := strings.ToUpper(strings.TrimSpace(symbol))
 	switch s {
 	case "WETH", "WEETH", "WSTETH", "STETH", "RETH", "CBETH":
@@ -67,7 +68,7 @@ func normalizeSymbol(symbol string) string {
 // ImpliedVol returns the annualised options-implied volatility for an asset, or
 // ok=false when none is available.
 func (d *Deribit) ImpliedVol(ctx context.Context, symbol string) (float64, bool) {
-	cur, supported := deribitCurrencies[normalizeSymbol(symbol)]
+	cur, supported := deribitCurrencies[NormalizeSymbol(symbol)]
 	if !supported {
 		return 0, false
 	}

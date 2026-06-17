@@ -77,40 +77,69 @@ func (g *GeckoTerminal) poolsForChain(ctx context.Context, chain Chain, perChain
 		if len(pools) >= perChain {
 			break
 		}
-		a := d.Attributes
-		tvl := parseFloat(a.ReserveInUSD)
-		vol := parseFloat(a.VolumeUSD.H24)
-		if tvl <= 0 || vol <= 0 {
+		rp, ok := g.toRawPool(ctx, chain, d, symbols)
+		if !ok {
 			continue
 		}
-		base, quote := splitPairName(a.Name)
-		if s, ok := symbols[d.Relationships.BaseToken.Data.ID]; ok {
-			base = s
-		}
-		if s, ok := symbols[d.Relationships.QuoteToken.Data.ID]; ok {
-			quote = s
-		}
-
-		closes, ppy := g.priceHistory(ctx, chain.Slug, a.Address)
-
-		pools = append(pools, RawPool{
-			Chain:          chain.Display,
-			ChainSlug:      chain.Slug,
-			ChainKind:      chain.Kind,
-			Address:        a.Address,
-			DEX:            d.Relationships.DEX.Data.ID,
-			Name:           fmt.Sprintf("%s / %s", base, quote),
-			BaseSymbol:     base,
-			QuoteSymbol:    quote,
-			FeeTier:        feeTier(a),
-			TVLUSD:         tvl,
-			Volume24hUSD:   vol,
-			PriceUSD:       parseFloat(a.BaseTokenPriceUSD),
-			Closes:         closes,
-			PeriodsPerYear: ppy,
-		})
+		pools = append(pools, rp)
 	}
 	return pools, nil
+}
+
+// PoolByAddress fetches a single pool's market data (plus hourly OHLCV) for the
+// given chain. It is used to analyse a specifically tracked LP position.
+func (g *GeckoTerminal) PoolByAddress(ctx context.Context, chain Chain, address string) (RawPool, error) {
+	var resp singlePoolResponse
+	url := fmt.Sprintf("%s/networks/%s/pools/%s", g.baseURL, chain.Slug, address)
+	if err := g.getJSON(ctx, url, &resp); err != nil {
+		return RawPool{}, err
+	}
+	symbols := indexTokenSymbols(resp.Included)
+	rp, ok := g.toRawPool(ctx, chain, resp.Data, symbols)
+	if !ok {
+		return RawPool{}, fmt.Errorf("pool %s on %s returned no usable data", address, chain.Slug)
+	}
+	return rp, nil
+}
+
+// toRawPool turns one API pool object into a RawPool, enriching it with hourly
+// price history. ok is false when the pool lacks usable TVL/volume.
+func (g *GeckoTerminal) toRawPool(ctx context.Context, chain Chain, d poolData, symbols map[string]string) (RawPool, bool) {
+	a := d.Attributes
+	tvl := parseFloat(a.ReserveInUSD)
+	vol := parseFloat(a.VolumeUSD.H24)
+	if tvl <= 0 {
+		return RawPool{}, false
+	}
+
+	base, quote := splitPairName(a.Name)
+	if s, ok := symbols[d.Relationships.BaseToken.Data.ID]; ok {
+		base = s
+	}
+	if s, ok := symbols[d.Relationships.QuoteToken.Data.ID]; ok {
+		quote = s
+	}
+
+	closes, ppy := g.priceHistory(ctx, chain.Slug, a.Address)
+
+	return RawPool{
+		Chain:          chain.Display,
+		ChainSlug:      chain.Slug,
+		ChainKind:      chain.Kind,
+		Address:        a.Address,
+		DEX:            d.Relationships.DEX.Data.ID,
+		Protocol:       ProtocolFamily(d.Relationships.DEX.Data.ID),
+		Name:           fmt.Sprintf("%s / %s", base, quote),
+		BaseSymbol:     base,
+		QuoteSymbol:    quote,
+		FeeTier:        feeTier(a),
+		TVLUSD:         tvl,
+		Volume24hUSD:   vol,
+		PriceUSD:       parseFloat(a.BaseTokenPriceUSD),
+		QuotePriceUSD:  parseFloat(a.QuoteTokenPriceUSD),
+		Closes:         closes,
+		PeriodsPerYear: ppy,
+	}, true
 }
 
 // priceHistory returns up to 7 days of hourly closes (oldest first) and the
@@ -178,6 +207,11 @@ type poolsResponse struct {
 	Included []includedData `json:"included"`
 }
 
+type singlePoolResponse struct {
+	Data     poolData       `json:"data"`
+	Included []includedData `json:"included"`
+}
+
 type poolData struct {
 	ID            string         `json:"id"`
 	Attributes    poolAttributes `json:"attributes"`
@@ -189,12 +223,13 @@ type poolData struct {
 }
 
 type poolAttributes struct {
-	Name              string `json:"name"`
-	Address           string `json:"address"`
-	BaseTokenPriceUSD string `json:"base_token_price_usd"`
-	ReserveInUSD      string `json:"reserve_in_usd"`
-	PoolFeePercentage string `json:"pool_fee_percentage"`
-	VolumeUSD         struct {
+	Name               string `json:"name"`
+	Address            string `json:"address"`
+	BaseTokenPriceUSD  string `json:"base_token_price_usd"`
+	QuoteTokenPriceUSD string `json:"quote_token_price_usd"`
+	ReserveInUSD       string `json:"reserve_in_usd"`
+	PoolFeePercentage  string `json:"pool_fee_percentage"`
+	VolumeUSD          struct {
 		H24 string `json:"h24"`
 	} `json:"volume_usd"`
 }

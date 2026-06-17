@@ -80,6 +80,43 @@ button:hover { background: #232c3d; border-color: #33405a; }
 .card.fair .v { color: var(--amber); }
 .card.unattractive .v { color: var(--red); }
 
+/* ---- tracked position panel ---- */
+.tracked {
+  margin: 16px 24px 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+.tracked-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.tracked-head h2 { margin: 0; font-size: 16px; }
+.tracked-sub { color: var(--muted); font-size: 12.5px; }
+.tracked-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.tcard {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+.tcard h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
+.kv .k { color: var(--muted); }
+.kv .v { font-family: var(--mono); font-size: 12.5px; text-align: right; }
+.pill { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.pill.in { color: var(--green); border-color: #1f5e2c; }
+.pill.out { color: var(--red); border-color: #5e2724; }
+.pill.sync { color: var(--green); border-color: #1f5e2c; }
+.pill.drift { color: var(--amber); border-color: #5e4a1f; }
+
+.section-title { margin: 22px 24px 0; font-size: 16px; }
+
 /* ---- controls ---- */
 .controls {
   display: flex;
@@ -112,6 +149,14 @@ button:hover { background: #232c3d; border-color: #33405a; }
   font-size: 13px;
 }
 #search::placeholder { color: var(--muted); }
+#protocol-filter {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
 
 /* ---- layout ---- */
 .layout {
