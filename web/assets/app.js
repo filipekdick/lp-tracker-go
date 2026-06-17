@@ -1,0 +1,315 @@
+"use strict";
+
+// Frontend for the LP volatility analyzer. Polls the Go API, renders the pool
+// table and a per-pool fee-vs-volatility breakdown. No build step, no deps.
+
+const state = {
+  pools: [],
+  meta: null,
+  nextScan: null,
+  filters: { kind: "", verdict: "", search: "" },
+  sort: { key: "score", dir: -1 },
+  selected: null, // "chainSlug/address"
+};
+
+const fmt = {
+  usd(n) {
+    if (n == null) return "—";
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+    if (abs >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+    if (abs >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+    return "$" + n.toFixed(0);
+  },
+  pct(x) {
+    if (x == null) return "—";
+    return (x * 100).toFixed(x < 0.1 ? 2 : 1) + "%";
+  },
+  ratio(x) {
+    if (!x || !isFinite(x)) return "—";
+    return x.toFixed(2) + "×";
+  },
+  price(n) {
+    if (n == null) return "—";
+    if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (n >= 1) return n.toFixed(2);
+    if (n >= 0.01) return n.toFixed(4);
+    return n.toPrecision(3);
+  },
+};
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [meta, poolsResp] = await Promise.all([
+      getJSON("/api/meta"),
+      getJSON("/api/pools"),
+    ]);
+    state.meta = meta;
+    state.pools = poolsResp.pools || [];
+    state.nextScan = poolsResp.nextScan ? new Date(poolsResp.nextScan) : null;
+    renderStatus(meta, poolsResp);
+    renderSummary(meta);
+    renderTable();
+    if (state.selected) renderDetail(findSelected());
+  } catch (e) {
+    document.getElementById("source-label").textContent = "API unreachable";
+  }
+}
+
+function renderStatus(meta, poolsResp) {
+  const dot = document.getElementById("source-dot");
+  const label = document.getElementById("source-label");
+  label.textContent = "source: " + meta.source;
+  dot.className = "dot " + (poolsResp.scanning ? "scanning" : meta.source === "demo" ? "demo" : "live");
+}
+
+function renderSummary(meta) {
+  const c = meta.counts || {};
+  const total = state.pools.length;
+  const cards = [
+    { k: "Pools tracked", v: total, cls: "" },
+    { k: "Attractive", v: c.attractive || 0, cls: "attractive" },
+    { k: "Fair", v: c.fair || 0, cls: "fair" },
+    { k: "Unattractive", v: c.unattractive || 0, cls: "unattractive" },
+    { k: "Chains", v: (meta.chains || []).length, cls: "" },
+  ];
+  document.getElementById("summary").innerHTML = cards
+    .map((c) => `<div class="card ${c.cls}"><div class="k">${c.k}</div><div class="v">${c.v}</div></div>`)
+    .join("");
+}
+
+function countdown() {
+  const el = document.getElementById("scan-label");
+  if (!state.nextScan) {
+    el.textContent = "waiting for first scan…";
+    return;
+  }
+  const secs = Math.round((state.nextScan - new Date()) / 1000);
+  if (secs <= 0) {
+    el.textContent = "scanning soon…";
+  } else {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    el.textContent = "next scan in " + (m > 0 ? m + "m " : "") + s + "s";
+  }
+}
+
+// ---- table -----------------------------------------------------------------
+
+function sortKey(p) {
+  switch (state.sort.key) {
+    case "name": return p.name.toLowerCase();
+    case "chain": return p.chain.toLowerCase();
+    case "tvl": return p.tvlUsd;
+    case "vol": return p.volume24hUsd;
+    case "feeApr": return p.analysis.feeApr;
+    case "realizedVol": return p.analysis.realizedVol;
+    case "feeImpliedVol": return p.analysis.feeImpliedVol;
+    case "ratio": return p.analysis.feeYieldRatio;
+    case "verdict": return p.analysis.verdict;
+    default: return p.analysis.score;
+  }
+}
+
+function visiblePools() {
+  const f = state.filters;
+  let pools = state.pools.filter((p) => {
+    if (f.kind && p.chainKind !== f.kind) return false;
+    if (f.verdict && p.analysis.verdict !== f.verdict) return false;
+    if (f.search) {
+      const hay = (p.name + " " + p.chain + " " + p.dex + " " + p.baseSymbol + " " + p.quoteSymbol).toLowerCase();
+      if (!hay.includes(f.search.toLowerCase())) return false;
+    }
+    return true;
+  });
+  pools.sort((a, b) => {
+    const ka = sortKey(a), kb = sortKey(b);
+    if (ka < kb) return -1 * state.sort.dir;
+    if (ka > kb) return 1 * state.sort.dir;
+    return 0;
+  });
+  return pools;
+}
+
+function poolId(p) { return p.chainSlug + "/" + p.address; }
+
+function renderTable() {
+  const pools = visiblePools();
+  const body = document.getElementById("pools-body");
+  document.getElementById("empty").hidden = pools.length > 0;
+
+  body.innerHTML = pools
+    .map((p) => {
+      const a = p.analysis;
+      const ratioCls = a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg";
+      const sel = poolId(p) === state.selected ? " selected" : "";
+      return `<tr class="row${sel}" data-id="${poolId(p)}">
+        <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.dex}</span></div></td>
+        <td><span class="chain-tag">${p.chain}<span class="layer ${p.chainKind}">${p.chainKind}</span></span></td>
+        <td class="num">${fmt.usd(p.tvlUsd)}</td>
+        <td class="num">${fmt.usd(p.volume24hUsd)}</td>
+        <td class="num">${fmt.pct(a.feeApr)}</td>
+        <td class="num">${fmt.pct(a.realizedVol)}</td>
+        <td class="num">${fmt.pct(a.feeImpliedVol)}</td>
+        <td class="num ${ratioCls}">${fmt.ratio(a.feeYieldRatio)}</td>
+        <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
+      </tr>`;
+    })
+    .join("");
+
+  body.querySelectorAll("tr.row").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      state.selected = tr.dataset.id;
+      renderTable();
+      renderDetail(findSelected());
+    });
+  });
+}
+
+function findSelected() {
+  return state.pools.find((p) => poolId(p) === state.selected);
+}
+
+// ---- detail panel ----------------------------------------------------------
+
+function renderDetail(p) {
+  const empty = document.getElementById("detail-empty");
+  const content = document.getElementById("detail-content");
+  if (!p) {
+    empty.hidden = false;
+    content.hidden = true;
+    return;
+  }
+  empty.hidden = true;
+  content.hidden = false;
+
+  const a = p.analysis;
+  const vols = [
+    { label: "Fee-implied σ", val: a.feeImpliedVol, cls: "fees" },
+    { label: "Realized σ", val: a.realizedVol, cls: "realized" },
+  ];
+  if (a.hasImplied) vols.push({ label: "Options-implied σ", val: a.impliedVol, cls: "implied" });
+  const maxVol = Math.max(...vols.map((v) => v.val), 0.0001);
+
+  const verdictText = {
+    attractive: "Fees are pricing in more volatility than the asset actually shows — LPs are being overpaid for the risk.",
+    fair: "Fee income roughly matches the cost of the asset's volatility.",
+    unattractive: "The asset's volatility costs more than the pool's fees pay — LPs likely lose to rebalancing.",
+    unknown: "Not enough data to judge this pool.",
+  }[a.verdict];
+
+  content.innerHTML = `
+    <h2>${p.name}</h2>
+    <div class="sub">${p.dex} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · fee ${fmt.pct(p.feeTier)}</div>
+
+    <div class="verdict-banner ${a.verdict}">
+      <strong style="text-transform:capitalize">${a.verdict}.</strong> ${verdictText}
+    </div>
+
+    <div class="metric-grid">
+      <div class="metric"><div class="k">Fee APR</div><div class="v">${fmt.pct(a.feeApr)}</div></div>
+      <div class="metric"><div class="k">Fee / Vol ratio</div><div class="v ${a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg"}">${fmt.ratio(a.feeYieldRatio)}</div></div>
+      <div class="metric"><div class="k">Net edge APR</div><div class="v ${a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.netEdgeApr)}</div></div>
+      <div class="metric"><div class="k">LVR cost (σ²⁄8)</div><div class="v">${fmt.pct(a.lvrCostRealized)}</div></div>
+    </div>
+
+    <div class="bars-title">Volatility comparison (annualized)</div>
+    <div class="bars">
+      ${vols.map((v) => `
+        <div class="bar-row">
+          <span class="label">${v.label}</span>
+          <span class="bar-track"><span class="bar-fill ${v.cls}" style="width:${Math.max(2, (v.val / maxVol) * 100)}%"></span></span>
+          <span class="val">${fmt.pct(v.val)}</span>
+        </div>`).join("")}
+    </div>
+
+    <div class="spark">
+      <h3>${p.baseSymbol} price · 7d hourly</h3>
+      ${sparkline(p.closes)}
+    </div>
+
+    <div class="metric-grid" style="margin-top:14px">
+      <div class="metric"><div class="k">TVL</div><div class="v">${fmt.usd(p.tvlUsd)}</div></div>
+      <div class="metric"><div class="k">Volume 24h</div><div class="v">${fmt.usd(p.volume24hUsd)}</div></div>
+    </div>
+
+    <div class="addr">${p.address}</div>
+  `;
+}
+
+function sparkline(closes) {
+  if (!closes || closes.length < 2) return '<p class="hint">No price history.</p>';
+  const w = 320, h = 70, pad = 4;
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const range = max - min || 1;
+  const step = (w - pad * 2) / (closes.length - 1);
+  const pts = closes.map((c, i) => {
+    const x = pad + i * step;
+    const y = pad + (1 - (c - min) / range) * (h - pad * 2);
+    return x.toFixed(1) + "," + y.toFixed(1);
+  });
+  const up = closes[closes.length - 1] >= closes[0];
+  const stroke = up ? "#3fb950" : "#f85149";
+  const area = `${pad},${h - pad} ${pts.join(" ")} ${w - pad},${h - pad}`;
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polygon points="${area}" fill="${stroke}" opacity="0.08" />
+    <polyline points="${pts.join(" ")}" fill="none" stroke="${stroke}" stroke-width="1.6" stroke-linejoin="round" />
+  </svg>`;
+}
+
+// ---- wiring ----------------------------------------------------------------
+
+function wireControls() {
+  document.querySelectorAll("#kind-filters .chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.filters.kind = b.dataset.kind;
+      setActive("#kind-filters", b);
+      renderTable();
+    });
+  });
+  document.querySelectorAll("#verdict-filters .chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.filters.verdict = b.dataset.verdict;
+      setActive("#verdict-filters", b);
+      renderTable();
+    });
+  });
+  document.getElementById("search").addEventListener("input", (e) => {
+    state.filters.search = e.target.value;
+    renderTable();
+  });
+  document.querySelectorAll("thead th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      if (state.sort.key === key) state.sort.dir *= -1;
+      else state.sort = { key, dir: key === "name" || key === "chain" || key === "verdict" ? 1 : -1 };
+      renderTable();
+    });
+  });
+  document.getElementById("scan-now").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Scanning…";
+    try { await fetch("/api/scan", { method: "POST" }); } catch (_) {}
+    setTimeout(async () => {
+      await refresh();
+      e.target.disabled = false;
+      e.target.textContent = "Scan now";
+    }, 1500);
+  });
+}
+
+function setActive(group, btn) {
+  document.querySelectorAll(group + " .chip").forEach((b) => b.classList.remove("active"));
+  btn.classList.add("active");
+}
+
+wireControls();
+refresh();
+setInterval(refresh, 5000);
+setInterval(countdown, 1000);

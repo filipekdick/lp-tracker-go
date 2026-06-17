@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LP Vol Analyzer — fees vs. volatility</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📊</span>
+      <div>
+        <h1>LP Vol Analyzer</h1>
+        <p class="tagline">Are these pools paying enough fees for their volatility?</p>
+      </div>
+    </div>
+    <div class="status">
+      <div class="status-line">
+        <span class="dot" id="source-dot"></span>
+        <span id="source-label">source: …</span>
+      </div>
+      <div class="status-line">
+        <span id="scan-label">next scan in —</span>
+        <button id="scan-now" title="Trigger an immediate scan">Scan now</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="summary" id="summary"></section>
+
+  <section class="controls">
+    <div class="filter-group" id="kind-filters">
+      <button class="chip active" data-kind="">All layers</button>
+      <button class="chip" data-kind="L1">L1</button>
+      <button class="chip" data-kind="L2">L2</button>
+    </div>
+    <div class="filter-group" id="verdict-filters">
+      <button class="chip active" data-verdict="">All verdicts</button>
+      <button class="chip v-attractive" data-verdict="attractive">Attractive</button>
+      <button class="chip v-fair" data-verdict="fair">Fair</button>
+      <button class="chip v-unattractive" data-verdict="unattractive">Unattractive</button>
+    </div>
+    <div class="filter-group grow">
+      <input type="search" id="search" placeholder="Filter by token, pool or chain…" />
+    </div>
+  </section>
+
+  <main class="layout">
+    <section class="table-wrap">
+      <table id="pools">
+        <thead>
+          <tr>
+            <th data-sort="name">Pool</th>
+            <th data-sort="chain">Chain</th>
+            <th data-sort="tvl" class="num">TVL</th>
+            <th data-sort="vol" class="num">Vol 24h</th>
+            <th data-sort="feeApr" class="num">Fee APR</th>
+            <th data-sort="realizedVol" class="num">Realized σ</th>
+            <th data-sort="feeImpliedVol" class="num">Fee-implied σ</th>
+            <th data-sort="ratio" class="num">Fee/Vol</th>
+            <th data-sort="verdict">Verdict</th>
+          </tr>
+        </thead>
+        <tbody id="pools-body"></tbody>
+      </table>
+      <p class="empty" id="empty" hidden>No pools match the current filters.</p>
+    </section>
+
+    <aside class="detail" id="detail">
+      <div class="detail-empty" id="detail-empty">
+        <p>Select a pool to see the full fee-vs-volatility breakdown.</p>
+        <p class="hint">The model compares the volatility the pool's fees are
+          pricing in (<code>√(8·feeAPR)</code>) against the asset's realized and
+          options-implied volatility. When fees price in <em>more</em>
+          volatility than actually occurs, LPs are being overpaid.</p>
+      </div>
+      <div id="detail-content" hidden></div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Fee-implied σ = √(8·feeAPR).</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
