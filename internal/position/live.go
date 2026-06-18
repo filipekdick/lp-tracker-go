@@ -159,9 +159,15 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	}
 
 	if t.initialState != nil {
-		// Net PnL = Change in LP Value + Hedge PnL + Fees
+		// Net PnL of the strategy = the *change* since tracking started in LP
+		// value + hedge PnL + accrued fees. Each leg is measured relative to the
+		// baseline so the series starts at zero; using the absolute hedge PnL or
+		// fee balance here would offset the whole curve by whatever those were
+		// at inception.
 		lpChange := snap.ValueUSD - t.initialState.ValueUSD
-		snap.NetPnL = lpChange + snap.HedgePnL + snap.FeesUSD
+		hedgeChange := snap.HedgePnL - t.initialState.HedgePnL
+		feesChange := snap.FeesUSD - t.initialState.FeesUSD
+		snap.NetPnL = lpChange + hedgeChange + feesChange
 
 		t.history = append(t.history, snap)
 

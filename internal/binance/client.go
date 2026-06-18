@@ -300,8 +300,14 @@ func (c *Client) SyncShort(
 			// for simplicity, cancel existing to replace
 			c.CancelAllOrders(ctx, symbol)
 		}
-		priceStr := strconv.FormatFloat(markPrice, 'f', 4, 64) // basic precision
-		log.Printf("%s: placing LIMIT order (%s), driftPct: %.4f", symbol, reason, driftPct)
+		// Price the order at the symbol's tick size, offset to the maker side so
+		// the post-only order isn't rejected (-1111 precision / -5022 crossing).
+		tick, pricePrecision, perr := c.GetPriceFilter(ctx, symbol)
+		if perr != nil {
+			return perr
+		}
+		priceStr := makerLimitPrice(markPrice, tick, pricePrecision, side)
+		log.Printf("%s: placing LIMIT %s order @ %s (%s), driftPct: %.4f", symbol, side, priceStr, reason, driftPct)
 		_, err = c.PlaceLimitOrder(ctx, symbol, side, quantity, priceStr, reduceOnly, dryRun)
 		if err != nil && strings.Contains(err.Error(), "-4131") {
 			log.Printf("%s: limit price outside PERCENT_PRICE band, skipping this cycle", symbol)
@@ -348,6 +354,67 @@ func (c *Client) GetMinNotional(ctx context.Context, symbol string) (float64, er
 		}
 	}
 	return 0, fmt.Errorf("MIN_NOTIONAL not found for %s", symbol)
+}
+
+// GetPriceFilter returns the symbol's PRICE_FILTER tick size and the number of
+// decimal places allowed for prices. Limit prices must be a multiple of the
+// tick and within the precision, or Binance rejects the order with -1111.
+func (c *Client) GetPriceFilter(ctx context.Context, symbol string) (tickSize float64, pricePrecision int, err error) {
+	info, err := c.futures.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("could not read exchange info: %w", err)
+	}
+	for _, s := range info.Symbols {
+		if s.Symbol != symbol {
+			continue
+		}
+		pricePrecision = s.PricePrecision
+		for _, f := range s.Filters {
+			if f["filterType"] == "PRICE_FILTER" {
+				if v, ok := f["tickSize"].(string); ok {
+					tickSize, _ = strconv.ParseFloat(v, 64)
+				}
+			}
+		}
+		return tickSize, pricePrecision, nil
+	}
+	return 0, 0, fmt.Errorf("symbol %s not found in exchange info: %w", symbol, ErrSymbolNotFound)
+}
+
+// makerLimitPrice returns a tick-aligned limit price that rests on the book as
+// a maker (post-only) order: below the mark for a buy, above it for a sell. The
+// small offset keeps the order from crossing the spread — which is what gets a
+// post-only (GTX) order rejected with -5022 — while staying close enough to
+// fill on the next move. The result is rounded to the symbol's price precision.
+func makerLimitPrice(mark, tick float64, pricePrecision int, side Side) string {
+	if mark <= 0 {
+		return strconv.FormatFloat(mark, 'f', pricePrecision, 64)
+	}
+	const edge = 0.0005 // ~5 bps inside-the-book offset
+	var p float64
+	if side == SideSell {
+		p = roundToTick(mark*(1+edge), tick, true)
+		if tick > 0 && p < mark+tick {
+			p = roundToTick(mark+tick, tick, true)
+		}
+	} else {
+		p = roundToTick(mark*(1-edge), tick, false)
+		if tick > 0 && p > mark-tick {
+			p = roundToTick(mark-tick, tick, false)
+		}
+	}
+	return strconv.FormatFloat(p, 'f', pricePrecision, 64)
+}
+
+// roundToTick snaps a price to the tick grid, rounding up or down as requested.
+func roundToTick(price, tick float64, up bool) float64 {
+	if tick <= 0 {
+		return price
+	}
+	if up {
+		return math.Ceil(price/tick) * tick
+	}
+	return math.Floor(price/tick) * tick
 }
 
 // PlaceLimitOrder places a post-only limit order.
