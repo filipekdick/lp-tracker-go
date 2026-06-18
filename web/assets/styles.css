@@ -127,6 +127,8 @@ button:hover { background: #232c3d; border-color: #33405a; }
   display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px;
   align-items: center; padding: 6px 0; border-top: 1px solid var(--border);
 }
+/* Fees & Rewards has a single (Unclaimed) value column. */
+.fees-card .liq-head, .fees-card .liq-row { grid-template-columns: 1.4fr 1fr; }
 .liq-sym { font-weight: 600; font-size: 13px; }
 .liq-col { display: flex; flex-direction: column; }
 .liq-amt { font-family: var(--mono); font-size: 12.5px; }

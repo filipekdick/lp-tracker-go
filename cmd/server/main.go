@@ -7,7 +7,8 @@
 //
 //	PORT              HTTP listen port (default 8080)
 //	DATA_SOURCE       "live" (GeckoTerminal + Deribit) or "demo" (default "demo")
-//	SCAN_INTERVAL     wait between scans, e.g. "10m", "30s" (default 10m)
+//	SCAN_INTERVAL     informational pool-scan cadence, e.g. "10m" (default 10m)
+//	POSITION_INTERVAL how often to refresh the LP position + hedge (default 3m)
 //	POOLS_PER_CHAIN   pools to keep per chain (default 8)
 //	CHAINS            comma-separated chain slugs to scan (default: built-in set)
 //	GECKOTERMINAL_URL override GeckoTerminal API base URL
@@ -44,14 +45,15 @@ func main() {
 	_ = godotenv.Load()
 
 	cfg := scanner.Config{
-		Chains:   resolveChains(os.Getenv("CHAINS")),
-		PerChain: envInt("POOLS_PER_CHAIN", 8),
-		Interval: envDuration("SCAN_INTERVAL", 10*time.Minute),
+		Chains:           resolveChains(os.Getenv("CHAINS")),
+		PerChain:         envInt("POOLS_PER_CHAIN", 8),
+		Interval:         envDuration("SCAN_INTERVAL", 10*time.Minute),
+		PositionInterval: envDuration("POSITION_INTERVAL", 3*time.Minute),
 	}
 
 	source, implied := buildSources()
-	log.Printf("data source: %s | %d chains | %d pools/chain | scan every %s",
-		source.Name(), len(cfg.Chains), cfg.PerChain, cfg.Interval)
+	log.Printf("data source: %s | %d chains | %d pools/chain | position every %s | pool scan: manual trigger only",
+		source.Name(), len(cfg.Chains), cfg.PerChain, cfg.PositionInterval)
 
 	tracker := buildTracker(source, implied)
 	if tracker != nil {
