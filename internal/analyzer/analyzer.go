@@ -23,7 +23,10 @@
 // under-pays LPs for the risk they take.
 package analyzer
 
-import "math"
+import (
+	"math"
+	"time"
+)
 
 // Input is the per-pool data required to run the model. All monetary values are
 // in USD and FeeTier is a fraction (e.g. 0.0005 for a 5 bps pool).
@@ -51,6 +54,7 @@ const (
 // expressed as annualised fractions (0.5 == 50%).
 type Result struct {
 	FeeAPR          float64 `json:"feeApr"`          // annualised fee yield on TVL
+	PositionFeeAPR  float64 `json:"positionFeeApr"`  // annualised fee yield on specific position
 	RealizedVol     float64 `json:"realizedVol"`     // annualised realised volatility
 	FeeImpliedVol   float64 `json:"feeImpliedVol"`   // volatility the fee yield prices in
 	ImpliedVol      float64 `json:"impliedVol"`      // options-implied volatility (0 if n/a)
@@ -195,4 +199,21 @@ func score(r Result) float64 {
 	}
 	// Net edge in basis points of annual yield, plus a bonus for the ratio.
 	return r.NetEdgeAPR*100 + math.Min(r.FeeYieldRatio, 10)
+}
+
+// PositionFeeAPR annualises the fees a single position has accrued over the
+// time it has been tracked, as a fraction of the position's current value.
+// feesAccruedUSD is the USD value of fees earned since elapsed began.
+// elapsed is the time the position has been observed. valueUSD is the current
+// position value. Returns 0 when inputs are non-positive or elapsed is too
+// short to annualise meaningfully.
+func PositionFeeAPR(feesAccruedUSD, valueUSD float64, elapsed time.Duration) float64 {
+	if valueUSD <= 0 || feesAccruedUSD <= 0 || elapsed <= 0 {
+		return 0
+	}
+	years := elapsed.Hours() / (24 * 365)
+	if years <= 0 {
+		return 0
+	}
+	return (feesAccruedUSD / valueUSD) / years
 }

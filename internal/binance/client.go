@@ -50,7 +50,10 @@ const (
 
 // ErrSymbolNotFound means the venue (for example the testnet) does not
 // list the requested trading symbol.
-var ErrSymbolNotFound = errors.New("symbol not listed on this venue")
+var (
+	ErrNoPositions    = errors.New("no positions found")
+	ErrSymbolNotFound = errors.New("symbol not listed on this venue")
+)
 
 // Connect creates a Binance futures client pointed at the testnet.
 func Connect(apiKey, apiSecret string) *Client {
@@ -373,6 +376,26 @@ func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) 
 // CancelAllOrders cancels all active orders for the symbol.
 func (c *Client) CancelAllOrders(ctx context.Context, symbol string) error {
 	return c.futures.NewCancelAllOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// GetMarkPrice returns the current futures mark price for a symbol
+// (e.g. "ETHUSDT"). Returns ErrSymbolNotFound if the symbol is not listed.
+func (c *Client) GetMarkPrice(ctx context.Context, symbol string) (float64, error) {
+	res, err := c.futures.NewPremiumIndexService().Symbol(symbol).Do(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid symbol") {
+			return 0, fmt.Errorf("%w: %s", ErrSymbolNotFound, symbol)
+		}
+		return 0, fmt.Errorf("fetching mark price for %s: %w", symbol, err)
+	}
+	if len(res) == 0 {
+		return 0, fmt.Errorf("%w: %s", ErrSymbolNotFound, symbol)
+	}
+	price, err := strconv.ParseFloat(res[0].MarkPrice, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing mark price for %s: %w", symbol, err)
+	}
+	return price, nil
 }
 
 // GetMinNotional fetches the MIN_NOTIONAL filter for the symbol.

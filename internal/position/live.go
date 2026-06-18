@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 	"github.com/filipekdick/lp-tracker-go/internal/hedger"
@@ -112,7 +113,21 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		tp.Volume24hUSD = rp.Volume24hUSD
 		tp.Analysis = runAnalysis(ctx, rp, t.iv)
 		tp.ValueUSD = positionValueUSD(report, rp)
-		tp.Price0, tp.Price1 = legPrices(report, rp)
+		tp.Price0 = legPrice(report.Symbol0, rp)
+		tp.Price1 = legPrice(report.Symbol1, rp)
+
+		if t.bn != nil {
+			if perp, ok := hedgeFutures[datasource.NormalizeSymbol(report.Symbol0)]; ok {
+				if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+					tp.Price0 = price
+				}
+			}
+			if perp, ok := hedgeFutures[datasource.NormalizeSymbol(report.Symbol1)]; ok {
+				if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+					tp.Price1 = price
+				}
+			}
+		}
 	}
 
 	tp.Hedges = t.hedges(ctx, report)
@@ -143,9 +158,10 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	}
 
 	if rp.Address != "" {
-		snap.Price0 = rp.PriceUSD
-		snap.Price1 = rp.QuotePriceUSD
-		snap.FeesUSD = report.UncollectedFees0*rp.PriceUSD + report.UncollectedFees1*rp.QuotePriceUSD
+		snap.Price0 = legPrice(report.Symbol0, rp)
+		snap.Price1 = legPrice(report.Symbol1, rp)
+		snap.FeesUSD = report.UncollectedFees0*legPrice(report.Symbol0, rp) +
+			report.UncollectedFees1*legPrice(report.Symbol1, rp)
 	}
 	for _, h := range tp.Hedges {
 		snap.HedgePnL += h.UnrealizedPnL
@@ -180,6 +196,9 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		hedgeChange := snap.HedgePnL - t.initialState.HedgePnL
 		feesChange := snap.FeesUSD - t.initialState.FeesUSD
 		snap.NetPnL = lpChange + hedgeChange + feesChange
+
+		elapsed := snap.Timestamp.Sub(t.initialState.Timestamp)
+		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(feesChange, tp.ValueUSD, elapsed)
 
 		t.history = append(t.history, snap)
 

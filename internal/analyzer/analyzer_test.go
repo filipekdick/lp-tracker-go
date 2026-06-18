@@ -3,6 +3,7 @@ package analyzer
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func approx(a, b, tol float64) bool { return math.Abs(a-b) <= tol }
@@ -115,5 +116,24 @@ func TestAnalyzeUnknownWithoutFees(t *testing.T) {
 	res := Analyze(Input{FeeTier: 0.003, TVLUSD: 1_000_000, Volume24hUSD: 0})
 	if res.Verdict != VerdictUnknown {
 		t.Fatalf("verdict = %q, want unknown", res.Verdict)
+	}
+}
+
+func TestPositionFeeAPR(t *testing.T) {
+	// $24 fees on a $7,200 position over 1 hour annualizes to roughly 2,900%.
+	apr := PositionFeeAPR(24, 7200, time.Hour)
+	// (24/7200) / (1 / (24*365)) = (1/300) * 8760 = 29.2 (which is 2920%)
+	if !approx(apr, 29.2, 1e-9) {
+		t.Fatalf("PositionFeeAPR = %v, want 29.2", apr)
+	}
+
+	if PositionFeeAPR(-5, 7200, time.Hour) != 0 {
+		t.Fatal("negative fees should yield zero")
+	}
+	if PositionFeeAPR(24, -100, time.Hour) != 0 {
+		t.Fatal("negative value should yield zero")
+	}
+	if PositionFeeAPR(24, 7200, 0) != 0 {
+		t.Fatal("zero duration should yield zero")
 	}
 }
