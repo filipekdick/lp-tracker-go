@@ -132,7 +132,7 @@ function renderPosition() {
 
   // LP card.
   const rangePill = p.inRange ? '<span class="pill in">in range</span>' : '<span class="pill out">out of range</span>';
-  const lp = `<div class="tcard" style="cursor: pointer; transition: transform 0.2s;" onclick="document.getElementById('pools').scrollIntoView({behavior: 'smooth'})" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'" title="Click to view all pools">
+  let lp = `<div class="tcard" style="cursor: pointer; transition: transform 0.2s;" onclick="document.getElementById('pools').scrollIntoView({behavior: 'smooth'})" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'" title="Click to view all pools">
     <h3>Liquidity position ${rangePill}</h3>
     ${kv("Pool", p.poolName + " · " + fmt.pct(p.feeTier))}
     ${kv(p.symbol0, fmt.amount(p.amount0))}
@@ -177,7 +177,7 @@ function renderPosition() {
   const anyDryRun = hedges.some(h => h.dryRun);
   const notes = hedges.map(h => h.note).filter(n => n).filter((v, i, self) => self.indexOf(v) === i).join(" · ");
 
-  const hedge = `<div class="tcard">
+  let hedge = `<div class="tcard">
     <h3>Perp short hedge ${rebalancePill}</h3>
     ${hedgeBody}
     ${notes ? `<p class="hint" style="margin-top:8px">${anyDryRun ? "🔒 dry-run · " : ""}${notes}</p>` : ""}
@@ -225,7 +225,8 @@ function renderPosition() {
     t0PnlStr = `<span class="${t0Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t0Pnl)}</span>`;
     t1PnlStr = `<span class="${t1Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t1Pnl)}</span>`;
 
-    const stratPnl = t0Pnl + t1Pnl + p.hedge.shortPnl;
+    const hedgePnl = (p.hedges || []).reduce((s, h) => s + (h.unrealizedPnl || 0), 0);
+    const stratPnl = t0Pnl + t1Pnl + hedgePnl;
     stratPnlStr = `<span class="${stratPnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(stratPnl)}</span>`;
     
     lp = lp.replace('</div>', `

@@ -92,6 +92,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickNow:      -200_600,
 		InRange:      true,
 		ValueUSD:     valueUSD,
+		Price0:       mark,
+		Price1:       1,
 		FeeTier:      rp.FeeTier,
 		TVLUSD:       rp.TVLUSD,
 		Volume24hUSD: rp.Volume24hUSD,
@@ -111,6 +113,13 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	// draw before any live scans land. Live tracking builds this incrementally;
 	// here we backfill a believable few hours in one shot.
 	tp.InitialState, tp.History = demoHistory(rng, closes, wethAmount, usdcAmount, current, entryPrice)
+
+	// Synthetic open limit orders so the "Open limit orders" table and its
+	// Cancel button are exercisable without live credentials.
+	tp.OpenLimitOrders = []binance.LimitOrder{
+		{Symbol: "ETHUSDT", OrderID: 9900667125, Side: "SELL", Price: mark * 1.001, OrigQty: 0.057, ExecutedQty: 0},
+		{Symbol: "VVVUSDT", OrderID: 9900667126, Side: "BUY", Price: 15.077, OrigQty: 1.2, ExecutedQty: 0.3},
+	}
 
 	return tp, nil
 }
@@ -143,7 +152,12 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 	}
 	start := time.Now().Add(-(n - 1) * step)
 	tail := closes[len(closes)-n:]
-	value0 := wethAmount*tail[0] + usdcAmount
+	// The position started with a bit more of the volatile leg and less of the
+	// stable leg; as price drifted, some converted. This makes the demo's
+	// impermanent-loss figure non-zero.
+	amt0At := func(progress float64) float64 { return wethAmount * (1 + 0.05*(1-progress)) }
+	amt1At := func(progress float64) float64 { return usdcAmount * (1 - 0.05*(1-progress)) }
+	value0 := amt0At(0)*tail[0] + amt1At(0)
 	hedge0 := short * (entry - tail[0]) // baseline hedge PnL at inception
 
 	feesTotal := 6 + rng.Float64()*40 // USD of fees accrued over the window
@@ -151,7 +165,8 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 	for i := 0; i < n; i++ {
 		progress := float64(i) / float64(n-1)
 		price := tail[i]
-		value := wethAmount*price + usdcAmount
+		amt0, amt1 := amt0At(progress), amt1At(progress)
+		value := amt0*price + amt1
 		hedgePnL := short * (entry - price) // short gains as price falls
 		fees := feesTotal * progress
 		// Net PnL is the change since inception (see live.go), so the curve
@@ -160,6 +175,8 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 			Timestamp: start.Add(time.Duration(i) * step),
 			Price0:    price,
 			Price1:    1,
+			Amount0:   amt0,
+			Amount1:   amt1,
 			ValueUSD:  value,
 			HedgePnL:  hedgePnL,
 			FeesUSD:   fees,
