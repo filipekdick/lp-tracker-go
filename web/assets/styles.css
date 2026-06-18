@@ -92,6 +92,51 @@ button:hover { background: #232c3d; border-color: #33405a; }
 .tracked-head h2 { margin: 0; font-size: 16px; }
 .tracked-sub { color: var(--muted); font-size: 12.5px; }
 .tracked-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+
+/* ---- Krystal-style position summary cards ---- */
+.pcards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.pcard {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.pcard-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--muted); margin-bottom: 6px;
+}
+.pcard-ico { font-size: 15px; }
+.pcard-big { font-size: 28px; font-weight: 700; letter-spacing: .3px; margin-bottom: 10px; }
+.pcard-big.ratio-pos { color: var(--green); }
+.pcard-big.ratio-neg { color: var(--red); }
+.pcard-subs { border-top: 1px solid var(--border); padding-top: 8px; }
+
+/* ---- current vs HODL / unclaimed vs claimed rows ---- */
+.liq-head {
+  display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px;
+  font-size: 11px; color: var(--muted); padding: 2px 0 6px;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.liq-head span:not(:first-child), .liq-col { text-align: right; }
+.liq-row {
+  display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px;
+  align-items: center; padding: 6px 0; border-top: 1px solid var(--border);
+}
+.liq-sym { font-weight: 600; font-size: 13px; }
+.liq-col { display: flex; flex-direction: column; }
+.liq-amt { font-family: var(--mono); font-size: 12.5px; }
+.liq-usd { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.liq-badge {
+  font-size: 10px; color: var(--muted); background: var(--panel);
+  border-radius: 4px; padding: 1px 4px; margin-left: 2px;
+}
+.liq-total { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+
 .tcard {
   background: var(--panel-2);
   border: 1px solid var(--border);

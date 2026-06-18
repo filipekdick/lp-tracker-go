@@ -93,6 +93,11 @@ func main() {
 func buildSources() (datasource.Source, datasource.ImpliedVolSource) {
 	switch strings.ToLower(envStr("DATA_SOURCE", "demo")) {
 	case "live", "geckoterminal", "gecko":
+		if os.Getenv("CG_API_KEY") != "" {
+			log.Println("GeckoTerminal: using CoinGecko demo API key (faster polling ~28 req/min)")
+		} else {
+			log.Println("GeckoTerminal: no CG_API_KEY set — throttling to ~9 req/min (set CG_API_KEY to go faster)")
+		}
 		return datasource.NewGeckoTerminal(os.Getenv("GECKOTERMINAL_URL"), os.Getenv("CG_API_KEY")),
 			datasource.NewDeribit(os.Getenv("DERIBIT_URL"))
 	default:

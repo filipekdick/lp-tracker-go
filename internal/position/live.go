@@ -108,6 +108,7 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		tp.Volume24hUSD = rp.Volume24hUSD
 		tp.Analysis = runAnalysis(ctx, rp, t.iv)
 		tp.ValueUSD = positionValueUSD(report, rp)
+		tp.Price0, tp.Price1 = legPrices(report, rp)
 	}
 
 	tp.Hedges = t.hedges(ctx, report)
@@ -263,23 +264,30 @@ func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []He
 	return hedges
 }
 
+// legPrice returns the USD price of one token symbol from the pool's reported
+// base/quote prices, matching by symbol and defaulting stablecoins to $1.
+func legPrice(sym string, rp datasource.RawPool) float64 {
+	switch strings.ToUpper(sym) {
+	case strings.ToUpper(rp.BaseSymbol):
+		return rp.PriceUSD
+	case strings.ToUpper(rp.QuoteSymbol):
+		return rp.QuotePriceUSD
+	}
+	if stableSymbols[strings.ToUpper(sym)] {
+		return 1
+	}
+	return 0
+}
+
+// legPrices returns the current USD prices of the position's two legs.
+func legPrices(report lp.PositionReport, rp datasource.RawPool) (float64, float64) {
+	return legPrice(report.Symbol0, rp), legPrice(report.Symbol1, rp)
+}
+
 // positionValueUSD prices both legs of the position using the pool's reported
 // base/quote USD prices, matching by symbol.
 func positionValueUSD(report lp.PositionReport, rp datasource.RawPool) float64 {
-	price := func(sym string) float64 {
-		switch strings.ToUpper(sym) {
-		case strings.ToUpper(rp.BaseSymbol):
-			return rp.PriceUSD
-		case strings.ToUpper(rp.QuoteSymbol):
-			return rp.QuotePriceUSD
-		}
-		// Stablecoins default to $1 when unmatched.
-		if stableSymbols[strings.ToUpper(sym)] {
-			return 1
-		}
-		return 0
-	}
-	return report.Amount0*price(report.Symbol0) + report.Amount1*price(report.Symbol1)
+	return report.Amount0*legPrice(report.Symbol0, rp) + report.Amount1*legPrice(report.Symbol1, rp)
 }
 
 func absf(x float64) float64 {
