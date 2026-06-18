@@ -213,3 +213,7 @@ func geometricBrownianDemo(rng *rand.Rand, p0, annualVol float64, n int) []float
 	}
 	return closes
 }
+
+func (t *DemoTracker) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	return nil
+}

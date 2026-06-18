@@ -17,11 +17,7 @@ const state = {
 const fmt = {
   usd(n) {
     if (n == null) return "—";
-    const abs = Math.abs(n);
-    if (abs >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
-    if (abs >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
-    if (abs >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
-    return "$" + n.toFixed(0);
+    return "$" + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   },
   pct(x) {
     if (x == null) return "—";
@@ -33,18 +29,12 @@ const fmt = {
   },
   price(n) {
     if (n == null) return "—";
-    if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
-    if (n >= 1) return n.toFixed(2);
-    if (n >= 0.01) return n.toFixed(4);
-    return n.toPrecision(3);
+    if (Math.abs(n) >= 1) return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    return n.toPrecision(4);
   },
   amount(n) {
     if (n == null) return "—";
-    const abs = Math.abs(n);
-    if (abs >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
-    if (abs >= 1) return n.toFixed(3);
-    if (abs >= 0.0001) return n.toFixed(5);
-    return n.toPrecision(3);
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
   },
 };
 
@@ -94,9 +84,24 @@ function renderSummary(meta) {
     { k: "Chains", v: (meta.chains || []).length, cls: "" },
   ];
   document.getElementById("summary").innerHTML = cards
-    .map((c) => `<div class="card ${c.cls}"><div class="k">${c.k}</div><div class="v">${c.v}</div></div>`)
+    .map((c) => {
+      let clickHandler = "";
+      if (c.k === "Attractive" || c.k === "Fair" || c.k === "Unattractive") {
+        clickHandler = `onclick="window.setVerdictFilter('${c.k.toLowerCase()}')" style="cursor: pointer" title="Click to view pools"`;
+      }
+      return `<div class="card ${c.cls}" ${clickHandler}><div class="k">${c.k}</div><div class="v">${c.v}</div></div>`;
+    })
     .join("");
 }
+
+window.setVerdictFilter = function(verdict) {
+  document.querySelectorAll('#verdict-filters .chip').forEach(btn => {
+    if (btn.dataset.verdict === verdict) {
+      btn.click();
+    }
+  });
+  document.getElementById('pools').scrollIntoView({behavior: 'smooth'});
+};
 
 // ---- tracked position panel ------------------------------------------------
 
@@ -127,7 +132,7 @@ function renderPosition() {
 
   // LP card.
   const rangePill = p.inRange ? '<span class="pill in">in range</span>' : '<span class="pill out">out of range</span>';
-  const lp = `<div class="tcard">
+  const lp = `<div class="tcard" style="cursor: pointer; transition: transform 0.2s;" onclick="document.getElementById('pools').scrollIntoView({behavior: 'smooth'})" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'" title="Click to view all pools">
     <h3>Liquidity position ${rangePill}</h3>
     ${kv("Pool", p.poolName + " · " + fmt.pct(p.feeTier))}
     ${kv(p.symbol0, fmt.amount(p.amount0))}
@@ -198,6 +203,44 @@ function renderPosition() {
     </div>
   </div>`;
 
+  let ilStr = "—";
+  let t0PnlStr = "—";
+  let t1PnlStr = "—";
+  let stratPnlStr = "—";
+
+  if (p.initialState) {
+    const curV0 = p.amount0 * p.price0;
+    const curV1 = p.amount1 * p.price1;
+    const initV0 = p.initialState.amount0 * p.initialState.price0;
+    const initV1 = p.initialState.amount1 * p.initialState.price1;
+    
+    // Impermanent Loss = Current Value - (Initial amounts * Current prices)
+    const holdV0 = p.initialState.amount0 * p.price0;
+    const holdV1 = p.initialState.amount1 * p.price1;
+    const il = (curV0 + curV1) - (holdV0 + holdV1);
+    ilStr = `<span class="${il >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(il)}</span>`;
+
+    const t0Pnl = curV0 - initV0;
+    const t1Pnl = curV1 - initV1;
+    t0PnlStr = `<span class="${t0Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t0Pnl)}</span>`;
+    t1PnlStr = `<span class="${t1Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t1Pnl)}</span>`;
+
+    const stratPnl = t0Pnl + t1Pnl + p.hedge.shortPnl;
+    stratPnlStr = `<span class="${stratPnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(stratPnl)}</span>`;
+    
+    lp = lp.replace('</div>', `
+      ${kv("Initial " + p.symbol0, fmt.amount(p.initialState.amount0))}
+      ${kv("Initial " + p.symbol1, fmt.amount(p.initialState.amount1))}
+      ${kv("Impermanent Loss", ilStr)}
+    </div>`);
+
+    hedge = hedge.replace('</div>', `
+      ${kv(p.symbol0 + " PnL", t0PnlStr)}
+      ${kv(p.symbol1 + " PnL", t1PnlStr)}
+      ${kv("Total Strategy PnL", stratPnlStr)}
+    </div>`);
+  }
+
   document.getElementById("tracked-grid").innerHTML = lp + hedge + fee;
 
   const shortsSec = document.getElementById("open-shorts-section");
@@ -220,6 +263,34 @@ function renderPosition() {
     shortsSec.hidden = true;
   }
 
+  const ordersSec = document.getElementById("open-orders-section");
+  if (p.openLimitOrders && p.openLimitOrders.length > 0) {
+    ordersSec.hidden = false;
+    document.getElementById("open-orders-body").innerHTML = p.openLimitOrders.map(o => {
+      // Find mark price from open shorts if available
+      let distStr = "—";
+      const pos = p.openShorts?.find(s => s.symbol === o.symbol);
+      if (pos && pos.markPrice > 0) {
+        const dist = (o.price - pos.markPrice) / pos.markPrice;
+        distStr = `<span class="${Math.abs(dist) < 0.01 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(dist)}</span>`;
+      }
+      
+      const fillPct = o.origQty > 0 ? (o.executedQty / o.origQty) : 0;
+      
+      return `<tr>
+        <td>${o.symbol}</td>
+        <td>${o.side}</td>
+        <td class="num">${fmt.price(o.price)}</td>
+        <td class="num">${distStr}</td>
+        <td class="num">${fmt.amount(o.origQty)}</td>
+        <td class="num">${fmt.pct(fillPct)}</td>
+        <td class="num"><button onclick="window.cancelOrder('${o.symbol}', ${o.orderId})" style="cursor:pointer; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: #ff5555;">Cancel</button></td>
+      </tr>`;
+    }).join("");
+  } else {
+    ordersSec.hidden = true;
+  }
+
   const graphsSec = document.getElementById("graphs-section");
   if (p.initialState && p.history && p.history.length > 0) {
     graphsSec.hidden = false;
@@ -240,7 +311,10 @@ function renderPosition() {
     const pnlCls = netPnl >= 0 ? "ratio-pos" : "ratio-neg";
     const pnlHtml = `<div style="display:flex; flex-wrap:wrap; gap:2rem; margin-bottom:1rem; padding:1rem; background:var(--bg-card); border-radius:8px; border:1px solid var(--border);">
       <div style="flex:1;">
-        <h3 style="margin-top:0">Strategy Net Profit</h3>
+        <h3 style="margin-top:0; display:flex; align-items:center;">
+          Strategy Net Profit
+          <button onclick="document.getElementById('pnl-chart-wrapper').style.display = document.getElementById('pnl-chart-wrapper').style.display === 'none' ? 'block' : 'none'" style="margin-left:1rem; padding:2px 8px; font-size:12px; cursor:pointer; background:var(--bg); border:1px solid var(--border); color:var(--fg); border-radius:4px;">Toggle Graph</button>
+        </h3>
         <p class="hint">Since start (${new Date(p.initialState.timestamp).toLocaleString()})</p>
       </div>
       ${kv("Total PnL", `<span class="${pnlCls}">${fmt.usd(netPnl)}</span>`)}
@@ -249,7 +323,7 @@ function renderPosition() {
       ${kv("Collected Fees", fmt.usd(cur.feesUsd))}
     </div>`;
 
-    let canvasHtml = `<canvas id="pnl-chart" style="width:100%; height:250px;"></canvas>`;
+    let canvasHtml = `<div id="pnl-chart-wrapper" style="position: relative; height: 250px; width: 100%;"><canvas id="pnl-chart"></canvas></div>`;
     graphsSec.innerHTML = pnlHtml + canvasHtml;
     
     renderChart(p.history);
@@ -303,6 +377,7 @@ function renderChart(history) {
       ]
     },
     options: {
+      animation: false,
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
@@ -573,3 +648,12 @@ wireControls();
 refresh();
 setInterval(refresh, 5000);
 setInterval(countdown, 1000);
+window.cancelOrder = async function(symbol, orderId) {
+  try {
+    const r = await fetch(`/api/orders?symbol=${encodeURIComponent(symbol)}&orderId=${orderId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
+    refresh();
+  } catch (e) {
+    alert('Failed to cancel order: ' + e);
+  }
+};

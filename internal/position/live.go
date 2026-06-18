@@ -119,6 +119,9 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
 			tp.OpenShorts = open
 		}
+		if orders, err := t.bn.GetAllOpenOrders(ctx); err == nil {
+			tp.OpenLimitOrders = orders
+		}
 	}
 
 	// Snapshot for history
@@ -126,6 +129,8 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		Timestamp: tp.UpdatedAt,
 		Price0:    0,
 		Price1:    0,
+		Amount0:   report.Amount0,
+		Amount1:   report.Amount1,
 		ValueUSD:  tp.ValueUSD,
 		HedgePnL:  0,
 		FeesUSD:   0,
@@ -151,6 +156,8 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 			Timestamp: snap.Timestamp,
 			Price0:    snap.Price0,
 			Price1:    snap.Price1,
+			Amount0:   snap.Amount0,
+			Amount1:   snap.Amount1,
 			ValueUSD:  snap.ValueUSD,
 			HedgePnL:  snap.HedgePnL,
 			FeesUSD:   snap.FeesUSD,
@@ -280,4 +287,11 @@ func absf(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+func (t *LiveTracker) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	if t.bn == nil {
+		return fmt.Errorf("binance client not connected")
+	}
+	return t.bn.CancelOrder(ctx, symbol, orderID)
 }

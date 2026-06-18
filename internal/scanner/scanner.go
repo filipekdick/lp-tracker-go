@@ -201,6 +201,14 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 	s.mu.Unlock()
 }
 
+// CancelOrder delegates an order cancellation to the underlying position tracker.
+func (s *Scanner) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	if s.tracker == nil {
+		return fmt.Errorf("no position tracker configured")
+	}
+	return s.tracker.CancelOrder(ctx, symbol, orderID)
+}
+
 func (s *Scanner) retryFailed(ctx context.Context) {
 	s.mu.Lock()
 	failed := make([]datasource.Chain, len(s.failedChains))

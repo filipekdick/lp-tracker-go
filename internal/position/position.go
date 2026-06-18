@@ -70,9 +70,10 @@ type TrackedPosition struct {
 	Analysis analyzer.Result `json:"analysis"`
 
 	// Hedge state.
-	Hedges     []Hedge            `json:"hedges"`
-	Hedge      Hedge              `json:"hedge"` // Backward compatibility
-	OpenShorts []binance.Position `json:"openShorts"`
+	Hedges          []Hedge              `json:"hedges"`
+	Hedge           Hedge                `json:"hedge"` // Backward compatibility
+	OpenShorts      []binance.Position   `json:"openShorts"`
+	OpenLimitOrders []binance.LimitOrder `json:"openLimitOrders"`
 
 	// History
 	InitialState *Snapshot  `json:"initialState"`
@@ -88,6 +89,8 @@ type Snapshot struct {
 	Timestamp time.Time `json:"timestamp"`
 	Price0    float64   `json:"price0"`
 	Price1    float64   `json:"price1"`
+	Amount0   float64   `json:"amount0"`
+	Amount1   float64   `json:"amount1"`
 	ValueUSD  float64   `json:"valueUsd"`
 	HedgePnL  float64   `json:"hedgePnl"`
 	FeesUSD   float64   `json:"feesUsd"`
@@ -98,6 +101,7 @@ type Snapshot struct {
 type Tracker interface {
 	Name() string
 	Track(ctx context.Context) (TrackedPosition, error)
+	CancelOrder(ctx context.Context, symbol string, orderID int64) error
 }
 
 // hedgeFutures maps a (possibly wrapped) spot symbol to the perp used to hedge

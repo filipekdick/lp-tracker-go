@@ -4,8 +4,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pools/", s.handlePoolDetail)
 	mux.HandleFunc("/api/position", s.handlePosition)
 	mux.HandleFunc("/api/scan", s.handleScan)
+	mux.HandleFunc("/api/orders", s.handleOrders)
 
 	if s.static != nil {
 		mux.Handle("/", noCache(http.FileServer(http.FS(s.static))))
@@ -58,6 +61,38 @@ func noCache(next http.Handler) http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC()})
+}
+
+func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	symbol := r.URL.Query().Get("symbol")
+	orderIDStr := r.URL.Query().Get("orderId")
+	if symbol == "" || orderIDStr == "" {
+		http.Error(w, "missing symbol or orderId", http.StatusBadRequest)
+		return
+	}
+	orderID, err := strconv.ParseInt(orderIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid orderId", http.StatusBadRequest)
+		return
+	}
+
+	snap := s.scanner.Snapshot()
+	if snap.Position == nil {
+		http.Error(w, "position tracking unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := s.scanner.CancelOrder(r.Context(), symbol, orderID); err != nil {
+		http.Error(w, fmt.Sprintf("cancel failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 // metaResponse describes the scanner configuration for the UI.

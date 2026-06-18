@@ -30,6 +30,16 @@ type Position struct {
 	LiquidationPrice float64 `json:"liquidationPrice"`
 }
 
+// LimitOrder represents an active limit order.
+type LimitOrder struct {
+	Symbol      string  `json:"symbol"`
+	OrderID     int64   `json:"orderId"`
+	Side        string  `json:"side"`
+	Price       float64 `json:"price"`
+	OrigQty     float64 `json:"origQty"`
+	ExecutedQty float64 `json:"executedQty"`
+}
+
 // Side tells Binance whether we are buying or selling.
 type Side string
 
@@ -329,6 +339,35 @@ func (c *Client) SyncShort(
 // GetOpenOrders lists active limit orders for the symbol.
 func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]*futures.Order, error) {
 	return c.futures.NewListOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// GetAllOpenOrders lists all active limit orders across all symbols.
+func (c *Client) GetAllOpenOrders(ctx context.Context) ([]LimitOrder, error) {
+	orders, err := c.futures.NewListOpenOrdersService().Do(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var res []LimitOrder
+	for _, o := range orders {
+		price, _ := strconv.ParseFloat(o.Price, 64)
+		orig, _ := strconv.ParseFloat(o.OrigQuantity, 64)
+		exec, _ := strconv.ParseFloat(o.ExecutedQuantity, 64)
+		res = append(res, LimitOrder{
+			Symbol:      o.Symbol,
+			OrderID:     o.OrderID,
+			Side:        string(o.Side),
+			Price:       price,
+			OrigQty:     orig,
+			ExecutedQty: exec,
+		})
+	}
+	return res, nil
+}
+
+// CancelOrder cancels a specific order.
+func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	_, err := c.futures.NewCancelOrderService().Symbol(symbol).OrderID(orderID).Do(ctx)
+	return err
 }
 
 // CancelAllOrders cancels all active orders for the symbol.

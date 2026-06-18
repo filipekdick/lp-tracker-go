@@ -66,6 +66,30 @@
     </div>
   </section>
 
+  <section class="tracked" id="open-orders-section" hidden>
+    <div class="tracked-head">
+      <h2>Open limit orders</h2>
+      <span class="tracked-sub">Active limit orders on Binance</span>
+    </div>
+    <div class="table-wrap">
+      <table id="open-orders-table" class="pools-table" style="width: 100%">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th class="num">Price</th>
+            <th class="num">Distance from Mark</th>
+            <th class="num">Amount</th>
+            <th class="num">Fill %</th>
+            <th class="num" style="text-align: right">Action</th>
+          </tr>
+        </thead>
+        <tbody id="open-orders-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+
   <h2 class="section-title">Most profitable pools by chain</h2>
 
   <section class="controls">

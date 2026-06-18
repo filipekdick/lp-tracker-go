@@ -1,10 +1,12 @@
 package lp
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"strings"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
@@ -154,7 +156,7 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 	tickLower := position.TickLower.Int64()
 	tickUpper := position.TickUpper.Int64()
 
-	return PositionReport{
+	report := PositionReport{
 		TokenID:     tokenID,
 		NFPMAddress: successAddr.Hex(),
 		PoolAddress: poolAddr.Hex(),
@@ -168,7 +170,35 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 		InRange:     tickNow >= tickLower && tickNow <= tickUpper,
 		TokensOwed0: format.TokenAmount(position.TokensOwed0, dec0),
 		TokensOwed1: format.TokenAmount(position.TokensOwed1, dec1),
-	}, nil
+	}
+
+	// Simulate collect() to get real uncollected fees instead of static TokensOwed
+	parsedABI, err := aerodrome.NFPMMetaData.GetAbi()
+	if err == nil {
+		maxUint128 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+		data, err := parsedABI.Pack("collect", aerodrome.INonfungiblePositionManagerCollectParams{
+			TokenId:    big.NewInt(tokenID),
+			Recipient:  common.Address{},
+			Amount0Max: maxUint128,
+			Amount1Max: maxUint128,
+		})
+		if err == nil {
+			msg := ethereum.CallMsg{
+				To:   &successAddr,
+				Data: data,
+			}
+			res, err := r.client.CallContract(context.Background(), msg, nil)
+			if err == nil && len(res) >= 64 {
+				out, err := parsedABI.Unpack("collect", res)
+				if err == nil && len(out) == 2 {
+					report.TokensOwed0 = format.TokenAmount(out[0].(*big.Int), dec0)
+					report.TokensOwed1 = format.TokenAmount(out[1].(*big.Int), dec1)
+				}
+			}
+		}
+	}
+
+	return report, nil
 }
 
 // findPool derives the pool address for a position from the factory
