@@ -91,6 +91,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickUpper:    -199_800,
 		TickNow:      -200_600,
 		InRange:      true,
+		TokensOwed0:  0.0042 + rng.Float64()*0.002, // synthetic unclaimed fees
+		TokensOwed1:  8 + rng.Float64()*6,
 		ValueUSD:     valueUSD,
 		Price0:       mark,
 		Price1:       1,

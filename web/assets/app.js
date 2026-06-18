@@ -17,7 +17,8 @@ const state = {
 const fmt = {
   usd(n) {
     if (n == null) return "—";
-    return "$" + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const s = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (n < 0 ? "-$" : "$") + s;
   },
   pct(x) {
     if (x == null) return "—";
@@ -130,16 +131,100 @@ function renderPosition() {
 
   const a = p.analysis || {};
 
-  // LP card.
+  // ---- derived position metrics --------------------------------------------
+  const price0 = p.price0 || 0, price1 = p.price1 || 0;
+  const fees0 = (p.tokensOwed0 || 0) * price0;
+  const fees1 = (p.tokensOwed1 || 0) * price1;
+  const feesUsd = fees0 + fees1;
+  const curV0 = (p.amount0 || 0) * price0;
+  const curV1 = (p.amount1 || 0) * price1;
+  const totalV = (curV0 + curV1) || p.valueUsd || 0;
+  const hedgePnl = (p.hedges || []).reduce((s, h) => s + (h.unrealizedPnl || 0), 0);
+
+  // HODL comparison & impermanent loss need a captured baseline.
+  let depositVal = null, hodlVal = null, il = null, hodlV0 = null, hodlV1 = null;
+  let netPnl = null, roi = null;
+  if (p.initialState) {
+    hodlV0 = (p.initialState.amount0 || 0) * price0;
+    hodlV1 = (p.initialState.amount1 || 0) * price1;
+    hodlVal = hodlV0 + hodlV1;
+    depositVal = p.initialState.valueUsd;
+    il = totalV - hodlVal;
+  }
+  if (p.history && p.history.length) {
+    netPnl = p.history[p.history.length - 1].netPnl;
+    if (depositVal > 0) roi = (netPnl / depositVal) * 100;
+  }
+  const pnlV = netPnl != null ? netPnl
+    : (totalV - (depositVal != null ? depositVal : totalV)) + hedgePnl + feesUsd;
+
+  const cls = n => (n >= 0 ? "ratio-pos" : "ratio-neg");
+  const signed = n => (n >= 0 ? "+" : "") + fmt.usd(n);
   const rangePill = p.inRange ? '<span class="pill in">in range</span>' : '<span class="pill out">out of range</span>';
-  let lp = `<div class="tcard" style="cursor: pointer; transition: transform 0.2s;" onclick="document.getElementById('pools').scrollIntoView({behavior: 'smooth'})" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'" title="Click to view all pools">
-    <h3>Liquidity position ${rangePill}</h3>
-    ${kv("Pool", p.poolName + " · " + fmt.pct(p.feeTier))}
-    ${kv(p.symbol0, fmt.amount(p.amount0))}
-    ${kv(p.symbol1, fmt.amount(p.amount1))}
-    ${kv("Position value", fmt.usd(p.valueUsd))}
-    ${kv("Pool TVL / Vol 24h", fmt.usd(p.tvlUsd) + " / " + fmt.usd(p.volume24hUsd))}
-    ${kv("Tick range", p.tickLower + " … " + p.tickUpper + " (now " + p.tickNow + ")")}
+
+  // ---- top summary cards (Krystal-style big numbers) -----------------------
+  const summaryCards = `
+    <div class="pcard">
+      <div class="pcard-head"><span class="pcard-ico">💧</span>Total value ${rangePill}</div>
+      <div class="pcard-big">${fmt.usd(totalV)}</div>
+      <div class="pcard-subs">
+        ${kv("Deposits", depositVal != null ? fmt.usd(depositVal) : "—")}
+        ${kv(p.symbol0, fmt.usd(curV0))}
+        ${kv(p.symbol1, fmt.usd(curV1))}
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-head"><span class="pcard-ico">🪙</span>Earning</div>
+      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd)}</div>
+      <div class="pcard-subs">
+        ${kv("Unclaimed fees", fmt.usd(feesUsd))}
+        ${kv("Pool fee APR", fmt.pct(a.feeApr))}
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-head"><span class="pcard-ico">📈</span>Profit &amp; loss</div>
+      <div class="pcard-big ${cls(pnlV)}">${signed(pnlV)}</div>
+      <div class="pcard-subs">
+        ${kv("vs HODL (IL)", il != null ? `<span class="${cls(il)}">${fmt.usd(il)}</span>` : "—")}
+        ${kv("ROI", roi != null ? `<span class="${cls(roi)}">${roi.toFixed(2)}%</span>` : "—")}
+        ${kv("Hedge PnL", `<span class="${cls(hedgePnl)}">${fmt.usd(hedgePnl)}</span>`)}
+      </div>
+    </div>`;
+
+  // ---- Liquidity: current allocation vs HODL -------------------------------
+  const liqRow = (sym, curAmt, curUsd, hodlAmt, hodlUsd) => {
+    const curPct = totalV > 0 ? (curUsd / totalV) * 100 : 0;
+    const hodlPct = hodlVal > 0 ? (hodlUsd / hodlVal) * 100 : 0;
+    const hodlCell = hodlAmt != null
+      ? `<span class="liq-amt">${fmt.amount(hodlAmt)} <span class="liq-badge">${hodlPct.toFixed(0)}%</span></span><span class="liq-usd">${fmt.usd(hodlUsd)}</span>`
+      : `<span class="liq-amt">—</span>`;
+    return `<div class="liq-row">
+      <div class="liq-sym">${sym}</div>
+      <div class="liq-col"><span class="liq-amt">${fmt.amount(curAmt)} <span class="liq-badge">${curPct.toFixed(0)}%</span></span><span class="liq-usd">${fmt.usd(curUsd)}</span></div>
+      <div class="liq-col">${hodlCell}</div>
+    </div>`;
+  };
+  const liq = `<div class="tcard">
+    <h3>Liquidity ${rangePill}</h3>
+    <div class="liq-head"><span class="liq-sym">${p.poolName} · ${fmt.pct(p.feeTier)}</span><span>Current</span><span>HODL</span></div>
+    ${liqRow(p.symbol0, p.amount0, curV0, p.initialState ? p.initialState.amount0 : null, hodlV0)}
+    ${liqRow(p.symbol1, p.amount1, curV1, p.initialState ? p.initialState.amount1 : null, hodlV1)}
+    <div class="kv liq-total"><span class="k">Impermanent loss</span><span class="v">${il != null ? `<span class="${cls(il)}">${fmt.usd(il)}</span>` : "—"}</span></div>
+    <p class="hint" style="margin-top:8px">Tick ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}) · Pool TVL ${fmt.usd(p.tvlUsd)}</p>
+  </div>`;
+
+  // ---- Fees & Rewards (unclaimed vs claimed) -------------------------------
+  const feeRow = (sym, amt, usd) => `<div class="liq-row">
+    <div class="liq-sym">${sym}</div>
+    <div class="liq-col"><span class="liq-amt">${fmt.amount(amt)}</span><span class="liq-usd">${fmt.usd(usd)}</span></div>
+    <div class="liq-col"><span class="liq-amt">0</span><span class="liq-usd">$0.00</span></div>
+  </div>`;
+  const feesRewards = `<div class="tcard">
+    <h3>Fees &amp; Rewards</h3>
+    <div class="liq-head"><span></span><span>Unclaimed</span><span>Claimed</span></div>
+    ${feeRow(p.symbol0, p.tokensOwed0 || 0, fees0)}
+    ${feeRow(p.symbol1, p.tokensOwed1 || 0, fees1)}
+    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
   </div>`;
 
   // Hedge card.
@@ -203,46 +288,8 @@ function renderPosition() {
     </div>
   </div>`;
 
-  let ilStr = "—";
-  let t0PnlStr = "—";
-  let t1PnlStr = "—";
-  let stratPnlStr = "—";
-
-  if (p.initialState) {
-    const curV0 = p.amount0 * p.price0;
-    const curV1 = p.amount1 * p.price1;
-    const initV0 = p.initialState.amount0 * p.initialState.price0;
-    const initV1 = p.initialState.amount1 * p.initialState.price1;
-    
-    // Impermanent Loss = Current Value - (Initial amounts * Current prices)
-    const holdV0 = p.initialState.amount0 * p.price0;
-    const holdV1 = p.initialState.amount1 * p.price1;
-    const il = (curV0 + curV1) - (holdV0 + holdV1);
-    ilStr = `<span class="${il >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(il)}</span>`;
-
-    const t0Pnl = curV0 - initV0;
-    const t1Pnl = curV1 - initV1;
-    t0PnlStr = `<span class="${t0Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t0Pnl)}</span>`;
-    t1PnlStr = `<span class="${t1Pnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(t1Pnl)}</span>`;
-
-    const hedgePnl = (p.hedges || []).reduce((s, h) => s + (h.unrealizedPnl || 0), 0);
-    const stratPnl = t0Pnl + t1Pnl + hedgePnl;
-    stratPnlStr = `<span class="${stratPnl >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(stratPnl)}</span>`;
-    
-    lp = lp.replace('</div>', `
-      ${kv("Initial " + p.symbol0, fmt.amount(p.initialState.amount0))}
-      ${kv("Initial " + p.symbol1, fmt.amount(p.initialState.amount1))}
-      ${kv("Impermanent Loss", ilStr)}
-    </div>`);
-
-    hedge = hedge.replace('</div>', `
-      ${kv(p.symbol0 + " PnL", t0PnlStr)}
-      ${kv(p.symbol1 + " PnL", t1PnlStr)}
-      ${kv("Total Strategy PnL", stratPnlStr)}
-    </div>`);
-  }
-
-  document.getElementById("tracked-grid").innerHTML = lp + hedge + fee;
+  document.getElementById("position-summary").innerHTML = summaryCards;
+  document.getElementById("tracked-grid").innerHTML = liq + feesRewards + hedge + fee;
 
   const shortsSec = document.getElementById("open-shorts-section");
   if (p.openShorts && p.openShorts.length > 0) {

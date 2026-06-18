@@ -33,16 +33,22 @@ type GeckoTerminal struct {
 }
 
 // NewGeckoTerminal builds a GeckoTerminal source. baseURL may be empty to use
-// the public endpoint.
+// the public CoinGecko onchain endpoint. When an apiKey is supplied it is sent
+// as a CoinGecko demo key, which lifts the rate limit to ~30 req/min, so we can
+// poll roughly 3x faster than the unauthenticated ~9 req/min.
 func NewGeckoTerminal(baseURL, apiKey string) *GeckoTerminal {
 	if baseURL == "" {
 		baseURL = geckoBaseURL
+	}
+	reqGap := 6500 * time.Millisecond // ~9 req/min, safe without a key
+	if apiKey != "" {
+		reqGap = 2100 * time.Millisecond // ~28 req/min, under the demo cap
 	}
 	return &GeckoTerminal{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		http:    &http.Client{Timeout: 30 * time.Second},
-		reqGap:  6500 * time.Millisecond,
+		reqGap:  reqGap,
 	}
 }
 
