@@ -5,7 +5,6 @@ package api
 import (
 	"encoding/json"
 	"io/fs"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -171,10 +170,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // to keep the log readable.
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		//start := time.Now()
 		next.ServeHTTP(w, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("%s %s %s", r.Method, r.URL.RequestURI(), time.Since(start).Round(time.Millisecond))
+			//log.Printf("%s %s %s", r.Method, r.URL.RequestURI(), time.Since(start).Round(time.Millisecond))
 		}
 	})
 }

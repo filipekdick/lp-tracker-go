@@ -19,6 +19,21 @@ func TestHedgeLegPicksVolatileLeg(t *testing.T) {
 	}
 }
 
+func TestHedgeLegsMultiLeg(t *testing.T) {
+	// WETH/VVV -> should return both legs.
+	legs := hedgeLegs("WETH", "VVV", 2.1, 268.29)
+	if len(legs) != 2 {
+		t.Fatalf("expected 2 legs, got %d", len(legs))
+	}
+	if legs[0].Asset != "WETH" || legs[0].Perp != "ETHUSDT" || legs[0].Amount != 2.1 {
+		t.Errorf("leg 0 mismatch: %+v", legs[0])
+	}
+	if legs[1].Asset != "VVV" || legs[1].Perp != "VVVUSDT" || legs[1].Amount != 268.29 {
+		t.Errorf("leg 1 mismatch: %+v", legs[1])
+	}
+}
+
+
 func TestHedgeLegUnhedgeablePool(t *testing.T) {
 	// Two stablecoins -> nothing to hedge.
 	if _, _, _, ok := hedgeLeg("USDC", "DAI", 1, 1); ok {
@@ -38,12 +53,12 @@ func TestDemoTrackerIsConsistent(t *testing.T) {
 	if tp.Protocol != "Aerodrome" || tp.ChainSlug != "base" {
 		t.Fatalf("expected Aerodrome on base, got %s on %s", tp.Protocol, tp.ChainSlug)
 	}
-	if tp.Hedge.Symbol != "ETHUSDT" || tp.Hedge.ExposureSymbol != "WETH" {
-		t.Fatalf("unexpected hedge: %+v", tp.Hedge)
+	if tp.Hedges[0].Symbol != "ETHUSDT" || tp.Hedges[0].ExposureSymbol != "WETH" {
+		t.Fatalf("unexpected hedge: %+v", tp.Hedges)
 	}
 	// Target short should equal the WETH leg held in the LP.
-	if tp.Hedge.TargetShort != tp.Amount0 {
-		t.Fatalf("target short %v should match WETH amount %v", tp.Hedge.TargetShort, tp.Amount0)
+	if tp.Hedges[0].TargetShort != tp.Amount0 {
+		t.Fatalf("target short %v should match WETH amount %v", tp.Hedges[0].TargetShort, tp.Amount0)
 	}
 	// The analysis should have run and produced a fee-implied volatility.
 	if tp.Analysis.FeeImpliedVol <= 0 {

@@ -3,6 +3,7 @@ package position
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -98,68 +99,84 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		tp.ValueUSD = positionValueUSD(report, rp)
 	}
 
-	tp.Hedge = t.hedge(ctx, report)
+	tp.Hedges = t.hedges(ctx, report)
+	if len(tp.Hedges) > 0 {
+		tp.Hedge = tp.Hedges[0]
+	}
 	return tp, nil
 }
 
-// hedge determines the perp short that offsets the position's volatile leg and
-// reads the current Binance position when credentials are configured.
-func (t *LiveTracker) hedge(ctx context.Context, report lp.PositionReport) Hedge {
-	asset, amount, perp, ok := hedgeLeg(report.Symbol0, report.Symbol1, report.Amount0, report.Amount1)
-	if !ok {
-		return Hedge{
+// hedges determines the perp shorts that offset the position's volatile legs and
+// reads the current Binance positions when credentials are configured.
+// It also places/syncs orders if credentials are configured and dry-run is false.
+func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []Hedge {
+	legs := hedgeLegs(report.Symbol0, report.Symbol1, report.Amount0, report.Amount1)
+	if len(legs) == 0 {
+		return []Hedge{{
 			Available: false,
 			Note:      "no hedgeable (perp-listed) leg in this pool",
+		}}
+	}
+
+	var hedges []Hedge
+	for _, leg := range legs {
+		h := Hedge{
+			Venue:          "Binance Futures",
+			Symbol:         leg.Perp,
+			ExposureSymbol: leg.Asset,
+			LPExposure:     leg.Amount,
+			TargetShort:    leg.Amount,
+			DryRun:         t.dryRun,
 		}
-	}
 
-	h := Hedge{
-		Venue:          "Binance Futures",
-		Symbol:         perp,
-		ExposureSymbol: asset,
-		LPExposure:     amount,
-		TargetShort:    amount,
-		DryRun:         t.dryRun,
-	}
+		if t.bn == nil {
+			h.Available = false
+			h.Note = "advisory only — no Binance credentials configured"
+			hedges = append(hedges, h)
+			continue
+		}
 
-	if t.bn == nil {
-		h.Available = false
-		h.Note = "advisory only — no Binance credentials configured"
-		return h
-	}
+		// Perform the actual hedge sync if keys are present (SyncShort respects dryRun)
+		err := t.bn.SyncShort(ctx, leg.Perp, leg.Amount, 0.001, t.dryRun)
+		if err != nil {
+			log.Printf("[hedger] SyncShort failed for %s: %v", leg.Perp, err)
+		}
 
-	size, err := t.bn.GetPositionSize(ctx, perp)
-	if err != nil {
-		h.Available = false
-		h.Note = fmt.Sprintf("could not read Binance position: %v", err)
-		return h
-	}
-	current := 0.0
-	if size < 0 {
-		current = -size
-	}
-	h.CurrentShort = current
-	h.Drift = h.TargetShort - current
-	h.InSync = absf(h.Drift) < 0.01
-	h.Available = true
-	h.Note = "live"
-	if t.dryRun {
-		h.Note = "live read · hedge sync is dry-run"
-	}
+		size, err := t.bn.GetPositionSize(ctx, leg.Perp)
+		if err != nil {
+			h.Available = false
+			h.Note = fmt.Sprintf("could not read Binance position: %v", err)
+			hedges = append(hedges, h)
+			continue
+		}
+		current := 0.0
+		if size < 0 {
+			current = -size
+		}
+		h.CurrentShort = current
+		h.Drift = h.TargetShort - current
+		h.InSync = absf(h.Drift) < 0.01
+		h.Available = true
+		h.Note = "live"
+		if t.dryRun {
+			h.Note = "live read · hedge sync is dry-run"
+		}
 
-	// Enrich with entry/mark/PnL from the open positions list.
-	if open, err := t.bn.GetOpenPositions(ctx); err == nil {
-		for _, p := range open {
-			if p.Symbol == perp {
-				h.EntryPrice = p.EntryPrice
-				h.MarkPrice = p.MarkPrice
-				h.UnrealizedPnL = p.UnrealizedPnL
-				h.NotionalUSD = absf(p.Size) * p.MarkPrice
-				break
+		// Enrich with entry/mark/PnL from the open positions list.
+		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
+			for _, p := range open {
+				if p.Symbol == leg.Perp {
+					h.EntryPrice = p.EntryPrice
+					h.MarkPrice = p.MarkPrice
+					h.UnrealizedPnL = p.UnrealizedPnL
+					h.NotionalUSD = absf(p.Size) * p.MarkPrice
+					break
+				}
 			}
 		}
+		hedges = append(hedges, h)
 	}
-	return h
+	return hedges
 }
 
 // positionValueUSD prices both legs of the position using the pool's reported

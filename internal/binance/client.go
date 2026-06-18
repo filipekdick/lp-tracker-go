@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -35,6 +36,10 @@ const (
 	SideSell Side = "SELL"
 )
 
+// ErrSymbolNotFound means the venue (for example the testnet) does not
+// list the requested trading symbol.
+var ErrSymbolNotFound = errors.New("symbol not listed on this venue")
+
 // Connect creates a Binance futures client pointed at the testnet.
 func Connect(apiKey, apiSecret string) *Client {
 	futures.UseTestnet = true
@@ -49,6 +54,17 @@ func (c *Client) Ping(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("Could not reach Binance: %w", err)
 	}
 	return serverTime, nil
+}
+
+// SyncTime aligns our clock with Binance's server time. Signed requests
+// rejected with error -1021 if our timestamp drifts too far from theirs,
+// happens on clould machines. Call this once after Connect.
+func (c *Client) SyncTime(ctx context.Context) error {
+	_, err := c.futures.NewServerTimeService().Do(ctx)
+	if err != nil {
+		return fmt.Errorf("syncing time with bincance: %w", err)
+	}
+	return nil
 }
 
 // parseFloatOrZero parses a Binance numeric string, returning 0 if it can't.
@@ -72,7 +88,7 @@ func (c *Client) GetQuantityPrecision(ctx context.Context, symbol string) (int, 
 			return s.QuantityPrecision, nil
 		}
 	}
-	return 0, fmt.Errorf("symbol %s not found in exchange info", symbol)
+	return 0, fmt.Errorf("symbol %s not found in exchange info: %w", symbol, ErrSymbolNotFound)
 }
 
 // GetBalances reads all asset balances in the futures acccount.
@@ -189,6 +205,8 @@ func (c *Client) PlaceMarketOrder(
 	if err != nil {
 		return nil, fmt.Errorf("placing order failed: %w", err)
 	}
+	log.Printf("[LIVE]Placed MARKE %s: %s %s (reduceOnly=%t) -> orderID %d, filled %s @avg %s, status %s",
+		side, quantity, symbol, reduceOnly, order.OrderID, order.CumQty, order.AvgPrice, order.Status)
 	return order, nil
 }
 

@@ -95,6 +95,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TVLUSD:       rp.TVLUSD,
 		Volume24hUSD: rp.Volume24hUSD,
 		Analysis:     res,
+		Hedges:       []Hedge{hedge},
 		Hedge:        hedge,
 		Source:       "demo",
 		UpdatedAt:    time.Now(),

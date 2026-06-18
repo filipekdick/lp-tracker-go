@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -60,6 +62,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if strings.ToLower(envStr("DATA_SOURCE", "demo")) == "live" {
+		runStartupSummary(ctx)
+	}
+
 	go sc.Run(ctx)
 
 	server := &http.Server{
@@ -96,7 +102,6 @@ func buildSources() (datasource.Source, datasource.ImpliedVolSource) {
 // Aerodrome (Base) contract addresses for the on-chain position reader, and the
 // default position to track.
 const (
-	aeroNFPMAddress    = "0x827922686190790b37229fd06084350E74485b72"
 	aeroFactoryAddress = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
 	defaultTokenID     = 71002035
 )
@@ -126,7 +131,8 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource)
 		return position.NewDemoTracker(tokenID)
 	}
 
-	reader := lp.NewReader(client, aeroNFPMAddress, aeroFactoryAddress)
+	nfpmAddr := envStr("NFPM_ADDRESS", "0x827922686190790b37229fd06084350E74485b72")
+	reader := lp.NewReader(client, nfpmAddr, aeroFactoryAddress)
 
 	// Binance hedge is optional: without keys the hedge is advisory.
 	var bn *binance.Client
@@ -199,4 +205,93 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+func runStartupSummary(ctx context.Context) {
+	rpcURL := os.Getenv("RPC_URL")
+	if rpcURL == "" {
+		log.Println("[startup] connecting to Base RPC... error: RPC_URL is not set")
+		return
+	}
+
+	fmt.Printf("[startup] connecting to Base RPC... ")
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		return
+	}
+	defer client.Close()
+
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		fmt.Printf("error querying chain ID: %v\n", err)
+		return
+	}
+	fmt.Printf("ok (chain id %s)\n", chainID.String())
+
+	// Reading position
+	tokenID := envInt64("TRACK_TOKEN_ID", defaultTokenID)
+	nfpmAddrStr := envStr("NFPM_ADDRESS", "0x827922686190790b37229fd06084350E74485b72")
+	fmt.Printf("[startup] reading LP position %d on NFPM %s... ", tokenID, nfpmAddrStr)
+
+	reader := lp.NewReader(client, nfpmAddrStr, aeroFactoryAddress)
+	report, err := reader.ReadPosition(tokenID)
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+	} else {
+		fmt.Printf("ok\n")
+		inRangeStr := "out of range"
+		if report.InRange {
+			inRangeStr = "in range"
+		}
+		fmt.Printf("[startup]   pool: %s/%s  amounts: %.1f %s / %.2f %s  (%s)\n",
+			report.Symbol0, report.Symbol1,
+			report.Amount0, report.Symbol0,
+			report.Amount1, report.Symbol1,
+			inRangeStr,
+		)
+	}
+
+	// Connecting to Binance
+	apiKey := envStr("BINANCE_TESTNET_API_KEY", os.Getenv("BINANCE_API_KEY"))
+	apiSecret := envStr("BINANCE_TESTNET_API_SECRET", os.Getenv("BINANCE_API_SECRET"))
+	if apiKey == "" || apiSecret == "" {
+		log.Println("[startup] connecting to Binance futures testnet... skipping hedge, advisory only")
+	} else {
+		fmt.Printf("[startup] connecting to Binance futures testnet... ")
+		bn := binance.Connect(apiKey, apiSecret)
+		err := bn.SyncTime(ctx)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+		} else {
+			fmt.Printf("ok\n")
+			balances, err := bn.GetBalances(ctx)
+			if err != nil {
+				fmt.Printf("[startup]   error reading balances: %v\n", err)
+			} else {
+				for _, bal := range balances {
+					if bal.Asset == "USDT" {
+						fmt.Printf("[startup]   account: USDT balance %s (available %s)\n", bal.Balance, bal.AvailableBalance)
+					}
+				}
+			}
+
+			openPos, err := bn.GetOpenPositions(ctx)
+			if err != nil {
+				fmt.Printf("[startup]   error reading open positions: %v\n", err)
+			} else {
+				for _, pos := range openPos {
+					side := "LONG"
+					if pos.Size < 0 {
+						side = "SHORT"
+					}
+					fmt.Printf("[startup]   open positions: %s %s %.2f @ entry %.2f PnL %+.2f\n",
+						pos.Symbol, side, math.Abs(pos.Size), pos.EntryPrice, pos.UnrealizedPnL,
+					)
+				}
+			}
+		}
+	}
+
+	log.Println("[startup] ready — starting scan + position loops")
 }

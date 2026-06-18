@@ -113,7 +113,6 @@ function renderPosition() {
     + (p.error ? ` · <span style="color:var(--red)">${p.error}</span>` : "");
 
   const a = p.analysis || {};
-  const h = p.hedge || {};
 
   // LP card.
   const rangePill = p.inRange ? '<span class="pill in">in range</span>' : '<span class="pill out">out of range</span>';
@@ -128,24 +127,43 @@ function renderPosition() {
   </div>`;
 
   // Hedge card.
-  let hedgeBody;
-  if (!h.available && !h.symbol) {
-    hedgeBody = `<p class="hint">${h.note || "No hedgeable leg."}</p>`;
-  } else {
-    const syncPill = h.inSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">drift</span>';
-    const pnlCls = (h.unrealizedPnl || 0) >= 0 ? "ratio-pos" : "ratio-neg";
-    hedgeBody = `${kv("Venue / perp", h.venue + " · " + h.symbol)}
-      ${kv("LP exposure", fmt.amount(h.lpExposure) + " " + h.exposureSymbol)}
-      ${kv("Target short", fmt.amount(h.targetShort) + " " + h.exposureSymbol)}
-      ${kv("Current short", h.available ? fmt.amount(h.currentShort) + " " + h.exposureSymbol : "—")}
-      ${kv("Drift", h.available ? fmt.amount(h.drift) : "—")}
-      ${kv("Entry / mark", (h.entryPrice ? fmt.price(h.entryPrice) : "—") + " / " + (h.markPrice ? fmt.price(h.markPrice) : "—"))}
-      ${kv("Short PnL", `<span class="${pnlCls}">${h.available ? fmt.usd(h.unrealizedPnl) : "—"}</span>`)}`;
+  let hedgeBody = "";
+  const hedges = p.hedges || [];
+  if (hedges.length === 0) {
+    const fallbackH = p.hedge || {};
+    if (!fallbackH.available && !fallbackH.symbol) {
+      hedgeBody = `<p class="hint">${fallbackH.note || "No hedgeable leg."}</p>`;
+    } else {
+      hedges.push(fallbackH);
+    }
   }
+
+  if (hedges.length > 0) {
+    hedges.forEach((h, idx) => {
+      if (idx > 0) {
+        hedgeBody += `<div style="border-top: 1px solid var(--border); margin: 12px 0;"></div>`;
+      }
+      const syncPill = h.inSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">drift</span>';
+      const pnlCls = (h.unrealizedPnl || 0) >= 0 ? "ratio-pos" : "ratio-neg";
+      hedgeBody += `${kv("Venue / perp", h.venue + " · " + h.symbol + " " + syncPill)}
+        ${kv("LP exposure", fmt.amount(h.lpExposure) + " " + h.exposureSymbol)}
+        ${kv("Target short", fmt.amount(h.targetShort) + " " + h.exposureSymbol)}
+        ${kv("Current short", h.available ? fmt.amount(h.currentShort) + " " + h.exposureSymbol : "—")}
+        ${kv("Drift", h.available ? fmt.amount(h.drift) : "—")}
+        ${kv("Entry / mark", (h.entryPrice ? fmt.price(h.entryPrice) : "—") + " / " + (h.markPrice ? fmt.price(h.markPrice) : "—"))}
+        ${kv("Short PnL", `<span class="${pnlCls}">${h.available ? fmt.usd(h.unrealizedPnl) : "—"}</span>`)}`;
+    });
+  }
+
+  const allSync = hedges.length > 0 && hedges.every(h => h.inSync);
+  const rebalancePill = hedges.length > 0 ? (allSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">rebalance</span>') : "";
+  const anyDryRun = hedges.some(h => h.dryRun);
+  const notes = hedges.map(h => h.note).filter(n => n).filter((v, i, self) => self.indexOf(v) === i).join(" · ");
+
   const hedge = `<div class="tcard">
-    <h3>Perp short hedge ${h.inSync != null && h.symbol ? (h.inSync ? '<span class="pill sync">in sync</span>' : '<span class="pill drift">rebalance</span>') : ""}</h3>
+    <h3>Perp short hedge ${rebalancePill}</h3>
     ${hedgeBody}
-    ${h.note ? `<p class="hint" style="margin-top:8px">${h.dryRun ? "🔒 dry-run · " : ""}${h.note}</p>` : ""}
+    ${notes ? `<p class="hint" style="margin-top:8px">${anyDryRun ? "🔒 dry-run · " : ""}${notes}</p>` : ""}
   </div>`;
 
   // Fee-vs-volatility card with comparison bars.

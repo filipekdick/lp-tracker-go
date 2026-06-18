@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type GeckoTerminal struct {
 	baseURL string
 	http    *http.Client
 
+	mu       sync.Mutex
 	// reqGap throttles requests to stay within the public rate limit
 	// (~30 req/min). It is applied before every HTTP call.
 	reqGap   time.Duration
@@ -38,7 +40,7 @@ func NewGeckoTerminal(baseURL string) *GeckoTerminal {
 	return &GeckoTerminal{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{Timeout: 20 * time.Second},
-		reqGap:  2200 * time.Millisecond,
+		reqGap:  6500 * time.Millisecond,
 	}
 }
 
@@ -168,6 +170,9 @@ func (g *GeckoTerminal) priceHistory(ctx context.Context, slug, address string) 
 }
 
 func (g *GeckoTerminal) getJSON(ctx context.Context, url string, dst any) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	// Throttle to respect the public rate limit.
 	if wait := g.reqGap - time.Since(g.lastCall); wait > 0 {
 		select {

@@ -3,6 +3,7 @@ package lp
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -18,6 +19,7 @@ import (
 // PositionReport bundles everything we want to know about a position.
 type PositionReport struct {
 	TokenID     int64
+	NFPMAddress string
 	PoolAddress string
 	Symbol0     string
 	Symbol1     string
@@ -32,29 +34,88 @@ type PositionReport struct {
 // Reader reades a LP position from one protocol, given its contract addresses.
 type Reader struct {
 	client      *ethclient.Client
-	nfpmAddr    common.Address
+	nfpmAddrs   []common.Address
 	factoryAddr common.Address
 }
 
 // NewReader builds a Reader for a connnected client and a protocol's addresses.
 func NewReader(client *ethclient.Client, nfpmAddr, factoryAddr string) *Reader {
+	var addrs []common.Address
+	for _, part := range strings.Split(nfpmAddr, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			addrs = append(addrs, common.HexToAddress(part))
+		}
+	}
+
+	// Default popular Aerodrome NFPM addresses
+	popular := []string{
+		"0x827922686190790b37229fd06084350E74485b72",
+		"0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
+	}
+	seen := make(map[common.Address]bool)
+	for _, addr := range addrs {
+		seen[addr] = true
+	}
+	for _, popStr := range popular {
+		popAddr := common.HexToAddress(popStr)
+		if !seen[popAddr] {
+			addrs = append(addrs, popAddr)
+			seen[popAddr] = true
+		}
+	}
+
 	return &Reader{
 		client:      client,
-		nfpmAddr:    common.HexToAddress(nfpmAddr),
+		nfpmAddrs:   addrs,
 		factoryAddr: common.HexToAddress(factoryAddr),
 	}
 }
 
 // ReadPosition reads all on-chain data for a token ID and computes the amounts.
 func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
-	nfpm, err := aerodrome.NewNFPM(r.nfpmAddr, r.client)
-	if err != nil {
-		return PositionReport{}, fmt.Errorf("binding NFPM: %w", err)
+	var position struct {
+		Nonce                    *big.Int
+		Operator                 common.Address
+		Token0                   common.Address
+		Token1                   common.Address
+		TickSpacing              *big.Int
+		TickLower                *big.Int
+		TickUpper                *big.Int
+		Liquidity                *big.Int
+		FeeGrowthInside0LastX128 *big.Int
+		FeeGrowthInside1LastX128 *big.Int
+		TokensOwed0              *big.Int
+		TokensOwed1              *big.Int
+	}
+	var lastErr error
+	var success bool
+	var triedAddrs []string
+	var successAddr common.Address
+
+	for _, addr := range r.nfpmAddrs {
+		triedAddrs = append(triedAddrs, addr.Hex())
+		nfpm, err := aerodrome.NewNFPM(addr, r.client)
+		if err != nil {
+			lastErr = fmt.Errorf("binding NFPM at %s: %w", addr.Hex(), err)
+			continue
+		}
+		pos, err := nfpm.Positions(nil, big.NewInt(tokenID))
+		if err != nil {
+			lastErr = fmt.Errorf("reading positions from %s: %w", addr.Hex(), err)
+			continue
+		}
+		position = pos
+		success = true
+		successAddr = addr
+		break
 	}
 
-	position, err := nfpm.Positions(nil, big.NewInt(tokenID))
-	if err != nil {
-		return PositionReport{}, fmt.Errorf("reading position %d: %w", tokenID, err)
+	if !success {
+		return PositionReport{}, fmt.Errorf(
+			"token ID %d was not found on the tried NFPM contract(s) (%s). The position may live on a different NFPM deployment. Please set the NFPM_ADDRESS env var to the correct position-NFT contract (which can be found on Basescan under the NFT's 'Contract Address' field). Last error: %w",
+			tokenID, strings.Join(triedAddrs, ", "), lastErr,
+		)
 	}
 
 	poolAddr, err := r.findPool(position.Token0, position.Token1, position.TickSpacing)
@@ -93,6 +154,7 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 
 	return PositionReport{
 		TokenID:     tokenID,
+		NFPMAddress: successAddr.Hex(),
 		PoolAddress: poolAddr.Hex(),
 		Symbol0:     sym0,
 		Symbol1:     sym1,

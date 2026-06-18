@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"strconv"
@@ -23,9 +24,9 @@ const (
 
 	defaultTokenID = 71002035
 
-	ethSymbol = "ETHUSDT" // the Binance perpetual we short against WETH
-	minChange = 0.001     // smallest change in size worth a trade
-	dryRun    = false     // true = print only, never send a real order
+	//ethSymbol = "ETHUSDT" // the Binance perpetual we short against WETH
+	minChange = 0.001 // smallest change in size worth a trade
+	dryRun    = false // true = print only, never send a real order
 )
 
 func main() {
@@ -57,14 +58,21 @@ func main() {
 	defer client.Close()
 
 	//5.Build the two sides: the LP reader and the Binance client.
-	reader := lp.NewReader(client, nfpmAddress, factoryAddress)
+	nfpmAddrEnv := os.Getenv("NFPM_ADDRESS")
+	if nfpmAddrEnv == "" {
+		nfpmAddrEnv = nfpmAddress
+	}
+	reader := lp.NewReader(client, nfpmAddrEnv, factoryAddress)
 	bn := binance.Connect(apiKey, apiSecret)
 
-	//6. A context carries cancellation/deadline info through API calls.
-	// background() is the plain, never-cancelled root context.
 	ctx := context.Background()
 
-	//7. Read the LP position from the chain.
+	//Align our clock with Binance to avoid timestamp (-1021) rejections
+	if err := bn.SyncTime(ctx); err != nil {
+		log.Fatalf("could not sync time with Binance: %v", err)
+	}
+
+	//6. Read the LP position from the chain.
 	report, err := reader.ReadPosition(tokenID)
 	if err != nil {
 		log.Fatalf("failed to read LP position %d: %v", tokenID, err)
@@ -73,21 +81,40 @@ func main() {
 		report.TokenID, report.Symbol0, report.Amount0,
 		report.Symbol1, report.Amount1, report.InRange)
 
-	//8. Find how much WETH this position currently holds.
-	wethAmount, found := amountForSymbol(report, "WETH")
-	if !found {
-		log.Fatalf("position %s/%s has no WETH leg; nothing to hedge here",
-			report.Symbol0, report.Symbol1)
-	}
-	log.Printf("WETH in LP: %.6f  ->  target short on %s: %.6f",
-		wethAmount, ethSymbol, wethAmount)
+	//7. Hedge each leg. A leg the LP does not hold, or a symbol the venue does not list
+	// is skipped without stopping the other leg.
+	hedgeLeg(ctx, bn, report, "WETH", "ETHUSDT", dryRun)
+	hedgeLeg(ctx, bn, report, "VIRTUAL", "VIRTUALUSDT", dryRun)
 
-	//9. Sync the short to match the WETH amount.
-	// With dryRun = true, SyncShort only prints what it would do.
-	if err := bn.SyncShort(ctx, ethSymbol, wethAmount, minChange, dryRun); err != nil {
-		log.Fatalf("sync short failed: %v", err)
-	}
 	log.Println("done")
+}
+
+// hedgeLeg syncs one Binance short to match one token in the LP position.
+// It logs what it does and never returns an error, so a single failing or
+// missing leg cannot stop the others.
+func hedgeLeg(
+	ctx context.Context,
+	bn *binance.Client,
+	r lp.PositionReport,
+	lpSymbol, futuresSymbol string,
+	dryRun bool,
+) {
+	amount, found := amountForSymbol(r, lpSymbol)
+	if !found {
+		log.Printf("%s: LP has no %s leg, skipping", futuresSymbol, lpSymbol)
+		return
+	}
+	log.Printf("%s in LP: %.6f -> target short on %s: %.6f",
+		lpSymbol, amount, futuresSymbol, amount)
+
+	err := bn.SyncShort(ctx, futuresSymbol, amount, minChange, dryRun)
+	if errors.Is(err, binance.ErrSymbolNotFound) {
+		log.Printf("%s: not listed on this venue (likely testnet), skipping leg", futuresSymbol)
+		return
+	}
+	if err != nil {
+		log.Printf("%s: hedge failed: %v", futuresSymbol, err)
+	}
 }
 
 // parseTokenID reads the token ID from the first command-line argument, or returns the default

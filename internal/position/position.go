@@ -67,7 +67,8 @@ type TrackedPosition struct {
 	Analysis analyzer.Result `json:"analysis"`
 
 	// Hedge state.
-	Hedge Hedge `json:"hedge"`
+	Hedges []Hedge `json:"hedges"`
+	Hedge  Hedge   `json:"hedge"` // Backward compatibility for older client app.js versions cache
 
 	Source    string    `json:"source"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -86,6 +87,7 @@ var hedgeFutures = map[string]string{
 	"ETH": "ETHUSDT", "BTC": "BTCUSDT", "SOL": "SOLUSDT",
 	"ARB": "ARBUSDT", "OP": "OPUSDT", "AVAX": "AVAXUSDT",
 	"LINK": "LINKUSDT", "MATIC": "MATICUSDT", "BNB": "BNBUSDT",
+	"VVV": "VVVUSDT", "VIRTUAL": "VIRTUALUSDT",
 }
 
 // stableSymbols are treated as non-volatile (no hedge needed for that leg).
@@ -94,24 +96,42 @@ var stableSymbols = map[string]bool{
 	"USDBC": true, "FRAX": true, "LUSD": true, "USDE": true,
 }
 
-// hedgeLeg picks the volatile leg of a position to hedge and the perp to use.
-// It prefers the non-stable leg; if both are volatile it hedges symbol0.
-func hedgeLeg(sym0, sym1 string, amt0, amt1 float64) (asset string, amount float64, perp string, ok bool) {
-	type leg struct {
+type HedgeLeg struct {
+	Asset  string
+	Amount float64
+	Perp   string
+}
+
+func hedgeLegs(sym0, sym1 string, amt0, amt1 float64) []HedgeLeg {
+	var legs []HedgeLeg
+	type candidate struct {
 		sym string
 		amt float64
 	}
-	legs := []leg{{sym0, amt0}, {sym1, amt1}}
-	for _, l := range legs {
-		if stableSymbols[strings.ToUpper(strings.TrimSpace(l.sym))] {
+	for _, c := range []candidate{{sym0, amt0}, {sym1, amt1}} {
+		if stableSymbols[strings.ToUpper(strings.TrimSpace(c.sym))] {
 			continue
 		}
-		norm := datasource.NormalizeSymbol(l.sym)
+		norm := datasource.NormalizeSymbol(c.sym)
 		if perp, has := hedgeFutures[norm]; has {
-			return l.sym, l.amt, perp, true
+			legs = append(legs, HedgeLeg{
+				Asset:  c.sym,
+				Amount: c.amt,
+				Perp:   perp,
+			})
 		}
 	}
-	return "", 0, "", false
+	return legs
+}
+
+// hedgeLeg picks the volatile leg of a position to hedge and the perp to use.
+// It prefers the non-stable leg; if both are volatile it hedges symbol0.
+func hedgeLeg(sym0, sym1 string, amt0, amt1 float64) (asset string, amount float64, perp string, ok bool) {
+	legs := hedgeLegs(sym0, sym1, amt0, amt1)
+	if len(legs) == 0 {
+		return "", 0, "", false
+	}
+	return legs[0].Asset, legs[0].Amount, legs[0].Perp, true
 }
 
 // runAnalysis runs the fee-vs-volatility model over a pool, attaching implied
