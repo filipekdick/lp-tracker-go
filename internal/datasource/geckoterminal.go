@@ -15,13 +15,14 @@ import (
 
 // geckoBaseURL is the public GeckoTerminal API v2 root. Override via the
 // GECKOTERMINAL_URL env var if proxying.
-const geckoBaseURL = "https://api.geckoterminal.com/api/v2"
+const geckoBaseURL = "https://api.coingecko.com/api/v3/onchain"
 
 // GeckoTerminal is a live Source backed by the GeckoTerminal public API. It
 // lists the most active pools per network and pulls hourly OHLCV to measure
 // realised volatility.
 type GeckoTerminal struct {
 	baseURL string
+	apiKey  string
 	http    *http.Client
 
 	mu sync.Mutex
@@ -33,12 +34,13 @@ type GeckoTerminal struct {
 
 // NewGeckoTerminal builds a GeckoTerminal source. baseURL may be empty to use
 // the public endpoint.
-func NewGeckoTerminal(baseURL string) *GeckoTerminal {
+func NewGeckoTerminal(baseURL, apiKey string) *GeckoTerminal {
 	if baseURL == "" {
 		baseURL = geckoBaseURL
 	}
 	return &GeckoTerminal{
 		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
 		http:    &http.Client{Timeout: 30 * time.Second},
 		reqGap:  6500 * time.Millisecond,
 	}
@@ -192,6 +194,9 @@ func (g *GeckoTerminal) getJSON(ctx context.Context, url string, dst any) error 
 	}
 	req.Header.Set("Accept", "application/json;version=20230302")
 	req.Header.Set("User-Agent", "lp-tracker-go/analyzer")
+	if g.apiKey != "" {
+		req.Header.Set("x-cg-demo-api-key", g.apiKey)
+	}
 
 	res, err := g.http.Do(req)
 	if err != nil {

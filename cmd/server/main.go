@@ -93,7 +93,7 @@ func main() {
 func buildSources() (datasource.Source, datasource.ImpliedVolSource) {
 	switch strings.ToLower(envStr("DATA_SOURCE", "demo")) {
 	case "live", "geckoterminal", "gecko":
-		return datasource.NewGeckoTerminal(os.Getenv("GECKOTERMINAL_URL")),
+		return datasource.NewGeckoTerminal(os.Getenv("GECKOTERMINAL_URL"), os.Getenv("CG_API_KEY")),
 			datasource.NewDeribit(os.Getenv("DERIBIT_URL"))
 	default:
 		return datasource.NewDemo(time.Now().UnixNano()), datasource.DemoImpliedVol{}
