@@ -19,9 +19,10 @@ import (
 
 // Config controls a scan cycle.
 type Config struct {
-	Chains   []datasource.Chain
-	PerChain int           // pools to keep per chain
-	Interval time.Duration // wait between automatic scans
+	Chains           []datasource.Chain
+	PerChain         int           // pools to keep per chain
+	Interval         time.Duration // informational cadence for manual pool scans
+	PositionInterval time.Duration // how often to refresh the LP position + hedge
 }
 
 // AnalyzedPool is a raw pool plus its analyzer result, as served to clients.
@@ -65,6 +66,9 @@ func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSour
 	if cfg.Interval <= 0 {
 		cfg.Interval = 10 * time.Minute
 	}
+	if cfg.PositionInterval <= 0 {
+		cfg.PositionInterval = 3 * time.Minute
+	}
 	if len(cfg.Chains) == 0 {
 		cfg.Chains = datasource.DefaultChains
 	}
@@ -97,13 +101,40 @@ func (s *Scanner) TriggerScan() {
 	}
 }
 
-// Run executes one scan immediately, then loops on the configured interval
-// until ctx is cancelled. Manual triggers run between ticks.
+// Run starts two independent loops and blocks until ctx is cancelled: a fast
+// loop that refreshes the LP position and Binance hedge, and a trigger-only
+// pool scan that hits GeckoTerminal once on startup and thereafter only when
+// the user clicks "Scan now" (TriggerScan). The two never share a timer, so the
+// hedge stays tight without burning GeckoTerminal quota on every tick.
 func (s *Scanner) Run(ctx context.Context) {
-	s.scanOnce(ctx)
+	go s.runPositionLoop(ctx)
+	s.runPoolScanLoop(ctx)
+}
 
-	ticker := time.NewTicker(s.cfg.Interval)
+// runPositionLoop refreshes the position + hedge immediately and then on every
+// PositionInterval tick, independent of any pool scan.
+func (s *Scanner) runPositionLoop(ctx context.Context) {
+	s.refreshPosition(ctx)
+
+	ticker := time.NewTicker(s.cfg.PositionInterval)
 	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshPosition(ctx)
+		}
+	}
+}
+
+// runPoolScanLoop runs the GeckoTerminal pool scan once on startup (so the table
+// is populated on first load) and thereafter only on manual triggers. Failed
+// chains are retried on their own slow ticker. There is deliberately no
+// automatic pool-scan ticker.
+func (s *Scanner) runPoolScanLoop(ctx context.Context) {
+	s.scanPools(ctx)
 
 	retryTicker := time.NewTicker(30 * time.Second)
 	defer retryTicker.Stop()
@@ -112,34 +143,35 @@ func (s *Scanner) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.scanOnce(ctx)
 		case <-retryTicker.C:
 			s.retryFailed(ctx)
 		case <-s.trigger:
-			s.scanOnce(ctx)
-			ticker.Reset(s.cfg.Interval)
+			s.scanPools(ctx)
 		}
 	}
 }
 
-func (s *Scanner) scanOnce(ctx context.Context) {
+// refreshPosition reads the on-chain LP state and syncs the Binance hedge,
+// updating only the tracked position. It never touches the pool-scan
+// bookkeeping (Scanning / LastScan / failedChains).
+func (s *Scanner) refreshPosition(ctx context.Context) {
+	tracked := s.trackPosition(ctx)
+	if tracked != nil {
+		s.mu.Lock()
+		s.snap.Position = tracked
+		s.mu.Unlock()
+	}
+}
+
+// scanPools runs the GeckoTerminal chain scan and is the only thing that drives
+// the Scanning flag and the scan timestamps. It does not touch the position.
+func (s *Scanner) scanPools(ctx context.Context) {
 	s.setScanning(true)
 	start := time.Now()
 
 	s.mu.Lock()
 	s.failedChains = nil
 	s.mu.Unlock()
-
-	// Run position tracking concurrently in its own goroutine
-	go func() {
-		tracked := s.trackPosition(ctx)
-		if tracked != nil {
-			s.mu.Lock()
-			s.snap.Position = tracked
-			s.mu.Unlock()
-		}
-	}()
 
 	for _, chain := range s.cfg.Chains {
 		if ctx.Err() != nil {
@@ -187,7 +219,8 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 	s.mu.Lock()
 	s.snap.Scanning = false
 	s.snap.LastScan = time.Now()
-	s.snap.NextScan = s.snap.LastScan.Add(s.cfg.Interval)
+	// Pool scanning is manual-only, so there is no scheduled next scan.
+	s.snap.NextScan = time.Time{}
 	s.snap.DurationMS = time.Since(start).Milliseconds()
 	if len(s.failedChains) > 0 {
 		if len(s.snap.Pools) == 0 {
@@ -213,21 +246,10 @@ func (s *Scanner) retryFailed(ctx context.Context) {
 	s.mu.Lock()
 	failed := make([]datasource.Chain, len(s.failedChains))
 	copy(failed, s.failedChains)
-	posErr := s.tracker != nil && (s.snap.Position == nil || s.snap.Position.Error != "")
 	s.mu.Unlock()
 
-	if posErr {
-		log.Println("[scanner] retrying failed position tracking...")
-		go func() {
-			tracked := s.trackPosition(ctx)
-			if tracked != nil {
-				s.mu.Lock()
-				s.snap.Position = tracked
-				s.mu.Unlock()
-			}
-		}()
-	}
-
+	// Position-tracking retries are handled by the fast position loop, so this
+	// retry path only re-attempts failed GeckoTerminal chains.
 	if len(failed) == 0 {
 		return
 	}

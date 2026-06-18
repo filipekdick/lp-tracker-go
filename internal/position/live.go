@@ -92,8 +92,6 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		InRange:          report.InRange,
 		UncollectedFees0: report.UncollectedFees0,
 		UncollectedFees1: report.UncollectedFees1,
-		CollectedFees0:   report.CollectedFees0,
-		CollectedFees1:   report.CollectedFees1,
 		TokensOwed0:      report.UncollectedFees0, // alias (back-compat)
 		TokensOwed1:      report.UncollectedFees1,
 		Source:           "live",

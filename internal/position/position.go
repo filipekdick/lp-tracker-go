@@ -58,13 +58,10 @@ type TrackedPosition struct {
 	TickNow     int64                `json:"tickNow"`
 	InRange     bool                 `json:"inRange"`
 
-	// Fees: uncollected (live claimable) vs collected (already withdrawn over
-	// the position's lifetime). TokensOwed0/1 are kept as a back-compat alias of
-	// the uncollected amounts.
+	// Uncollected (live claimable) fees. TokensOwed0/1 are kept as a back-compat
+	// alias of the uncollected amounts.
 	UncollectedFees0 float64 `json:"uncollectedFees0"`
 	UncollectedFees1 float64 `json:"uncollectedFees1"`
-	CollectedFees0   float64 `json:"collectedFees0"`
-	CollectedFees1   float64 `json:"collectedFees1"`
 	TokensOwed0      float64 `json:"tokensOwed0"`
 	TokensOwed1      float64 `json:"tokensOwed1"`
 

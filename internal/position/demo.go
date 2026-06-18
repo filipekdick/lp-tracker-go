@@ -91,12 +91,9 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickUpper:   -199_800,
 		TickNow:     -200_600,
 		InRange:     true,
-		// Synthetic fees: a small live claimable balance plus a larger amount
-		// already harvested over the position's life.
+		// Synthetic live claimable fees.
 		UncollectedFees0: 0.0042 + rng.Float64()*0.002,
 		UncollectedFees1: 8 + rng.Float64()*6,
-		CollectedFees0:   0.03 + rng.Float64()*0.02,
-		CollectedFees1:   60 + rng.Float64()*40,
 		TokensOwed0:      0.0042 + rng.Float64()*0.002,
 		TokensOwed1:      8 + rng.Float64()*6,
 		ValueUSD:         valueUSD,

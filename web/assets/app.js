@@ -8,6 +8,7 @@ const state = {
   meta: null,
   position: null,
   nextScan: null,
+  scanning: false,
   filters: { kind: "", verdict: "", protocol: "", search: "" },
   sort: { key: "score", dir: -1 },
   selected: null, // "chainSlug/address"
@@ -66,6 +67,7 @@ async function refresh() {
     state.pools = poolsResp.pools || [];
     state.position = posResp && posResp.tracking ? posResp.position : null;
     state.nextScan = poolsResp.nextScan ? new Date(poolsResp.nextScan) : null;
+    state.scanning = !!poolsResp.scanning;
     renderStatus(meta, poolsResp);
     renderSummary(meta);
     renderPosition();
@@ -155,20 +157,14 @@ function renderPosition() {
   // ---- derived position metrics --------------------------------------------
   const price0 = p.price0 || 0,
     price1 = p.price1 || 0;
-  // Uncollected = live claimable fees; collected = already withdrawn over the
-  // position's life. Fall back to the legacy tokensOwed alias if needed.
+  // Uncollected = live claimable fees. Fall back to the legacy tokensOwed alias.
   const unc0 =
     p.uncollectedFees0 != null ? p.uncollectedFees0 : p.tokensOwed0 || 0;
   const unc1 =
     p.uncollectedFees1 != null ? p.uncollectedFees1 : p.tokensOwed1 || 0;
-  const col0 = p.collectedFees0 || 0,
-    col1 = p.collectedFees1 || 0;
   const fees0 = unc0 * price0,
     fees1 = unc1 * price1;
   const feesUsd = fees0 + fees1;
-  const colUsd0 = col0 * price0,
-    colUsd1 = col1 * price1;
-  const collectedUsd = colUsd0 + colUsd1;
   const curV0 = (p.amount0 || 0) * price0;
   const curV1 = (p.amount1 || 0) * price1;
   const totalV = curV0 + curV1 || p.valueUsd || 0;
@@ -223,15 +219,10 @@ function renderPosition() {
     </div>
     <div class="pcard">
       <div class="pcard-head"><span class="pcard-ico">🪙</span>Earning</div>
-      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd + collectedUsd)}</div>
+      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd)}</div>
       <div class="pcard-subs">
-
-        ${kv("Unclaimed", fmt.usd(feesUsd))}
-        ${kv("Claimed", fmt.usd(collectedUsd))}
-        ${kv("Pool fee APR", fmt.pct(a.feeApr))}
         ${kv("Unclaimed fees", fmt.usd(feesUsd))}
         ${kv("Fee APR", fmt.pct(a.positionFeeApr || a.feeApr))}
-
       </div>
     </div>
     <div class="pcard">
@@ -271,18 +262,17 @@ function renderPosition() {
     <p class="hint" style="margin-top:8px">Tick ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}) · Pool TVL ${fmt.usd(p.tvlUsd)}</p>
   </div>`;
 
-  // ---- Fees & Rewards: unclaimed (uncollected) vs claimed (collected) ------
-  const feeRow = (sym, unAmt, unUsd, clAmt, clUsd) => `<div class="liq-row">
+  // ---- Fees & Rewards: unclaimed (uncollected) fees ------------------------
+  const feeRow = (sym, unAmt, unUsd) => `<div class="liq-row">
     <div class="liq-sym">${sym}</div>
     <div class="liq-col"><span class="liq-amt">${fmt.amount(unAmt)}</span><span class="liq-usd">${fmt.usd(unUsd)}</span></div>
-    <div class="liq-col"><span class="liq-amt">${fmt.amount(clAmt)}</span><span class="liq-usd">${fmt.usd(clUsd)}</span></div>
   </div>`;
-  const feesRewards = `<div class="tcard">
+  const feesRewards = `<div class="tcard fees-card">
     <h3>Fees &amp; Rewards</h3>
-    <div class="liq-head"><span></span><span>Unclaimed</span><span>Claimed</span></div>
-    ${feeRow(p.symbol0, unc0, fees0, col0, colUsd0)}
-    ${feeRow(p.symbol1, unc1, fees1, col1, colUsd1)}
-    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd + collectedUsd)}</span></span></div>
+    <div class="liq-head"><span></span><span>Unclaimed</span></div>
+    ${feeRow(p.symbol0, unc0, fees0)}
+    ${feeRow(p.symbol1, unc1, fees1)}
+    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
   </div>`;
 
   // Hedge card.
@@ -558,13 +548,16 @@ function syncProtocolFilter() {
 
 function countdown() {
   const el = document.getElementById("scan-label");
-  if (!state.nextScan) {
-    el.textContent = "waiting for first scan…";
+  if (state.scanning) {
+    el.textContent = "scanning pools…";
     return;
   }
-  const secs = Math.round((state.nextScan - new Date()) / 1000);
-  if (secs <= 0) {
-    el.textContent = "scanning soon…";
+  // Pool scanning is manual-only; there is no scheduled next scan to count down.
+  const secs = state.nextScan
+    ? Math.round((state.nextScan - new Date()) / 1000)
+    : -1;
+  if (Number.isNaN(secs) || secs <= 0) {
+    el.textContent = "pool scan: manual";
   } else {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
