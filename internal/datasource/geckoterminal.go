@@ -24,7 +24,7 @@ type GeckoTerminal struct {
 	baseURL string
 	http    *http.Client
 
-	mu       sync.Mutex
+	mu sync.Mutex
 	// reqGap throttles requests to stay within the public rate limit
 	// (~30 req/min). It is applied before every HTTP call.
 	reqGap   time.Duration
@@ -39,7 +39,7 @@ func NewGeckoTerminal(baseURL string) *GeckoTerminal {
 	}
 	return &GeckoTerminal{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 20 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second},
 		reqGap:  6500 * time.Millisecond,
 	}
 }
@@ -183,7 +183,10 @@ func (g *GeckoTerminal) getJSON(ctx context.Context, url string, dst any) error 
 	}
 	g.lastCall = time.Now()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqCtx, cancel := context.WithTimeout(context.Background(), g.http.Timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}

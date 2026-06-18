@@ -7,8 +7,10 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/adshao/go-binance/v2/futures"
+	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 )
 
 // Client wraps the Binance futures client so the rest of our
@@ -20,12 +22,12 @@ type Client struct {
 // Position is one open futures position in our simple form.
 // Position is one open futures position in our own simple form.
 type Position struct {
-	Symbol           string
-	Size             float64 // negative = short, positive = long
-	EntryPrice       float64
-	MarkPrice        float64
-	UnrealizedPnL    float64
-	LiquidationPrice float64
+	Symbol           string  `json:"symbol"`
+	Size             float64 `json:"size"` // negative = short, positive = long
+	EntryPrice       float64 `json:"entryPrice"`
+	MarkPrice        float64 `json:"markPrice"`
+	UnrealizedPnL    float64 `json:"unrealizedPnl"`
+	LiquidationPrice float64 `json:"liquidationPrice"`
 }
 
 // Side tells Binance whether we are buying or selling.
@@ -215,7 +217,7 @@ func (c *Client) PlaceMarketOrder(
 // It only trades when the gap is at least 'minChange', to avoid churn on noise.
 func (c *Client) SyncShort(
 	ctx context.Context, symbol string, targetShort,
-	minChange float64, dryRun bool) error {
+	minChange float64, dryRun bool, strategy *hedger.Strategy) error {
 	if targetShort < 0 {
 		return fmt.Errorf("targetShort must be zero or positive, got %v", targetShort)
 	}
@@ -245,7 +247,146 @@ func (c *Client) SyncShort(
 		return err
 	}
 
+	// 1. Calculate drift percentage
+	driftPct := 0.0
+	if targetShort > 0 {
+		driftPct = delta / targetShort
+	}
+
+	// 2. Determine Action
+	var action hedger.Action
+	var reason string
+	if strategy != nil {
+		action, reason = strategy.Decide(driftPct)
+	} else {
+		action, reason = hedger.ActionMarket, "no strategy provided"
+	}
+
 	quantity := strconv.FormatFloat(math.Abs(delta), 'f', precision, 64)
-	_, err = c.PlaceMarketOrder(ctx, symbol, side, quantity, reduceOnly, dryRun)
-	return err
+
+	// Fetch Min Notional and Mark Price
+	minNotional, _ := c.GetMinNotional(ctx, symbol)
+	openPositions, _ := c.GetOpenPositions(ctx)
+	var markPrice float64
+	for _, p := range openPositions {
+		if p.Symbol == symbol {
+			markPrice = p.MarkPrice
+			break
+		}
+	}
+	if markPrice == 0 {
+		// fallback to market price
+		prices, err := c.futures.NewListPricesService().Symbol(symbol).Do(ctx)
+		if err == nil && len(prices) > 0 {
+			markPrice = parseFloatOrZero(prices[0].Price)
+		}
+	}
+
+	qtyFloat, _ := strconv.ParseFloat(quantity, 64)
+	if qtyFloat == 0 || (markPrice > 0 && minNotional > 0 && qtyFloat*markPrice < minNotional) {
+		log.Printf("%s: gap %.4f below min notional %.2f, skipping", symbol, qtyFloat, minNotional)
+		return nil
+	}
+
+	switch action {
+	case hedger.ActionNone:
+		log.Printf("%s: %s (short %.2f, target %.2f)", symbol, reason, -current, targetShort)
+		return nil
+
+	case hedger.ActionLimit:
+		// Check existing open limit orders
+		openOrders, err := c.GetOpenOrders(ctx, symbol)
+		if err == nil && len(openOrders) > 0 {
+			// for simplicity, cancel existing to replace
+			c.CancelAllOrders(ctx, symbol)
+		}
+		priceStr := strconv.FormatFloat(markPrice, 'f', 4, 64) // basic precision
+		log.Printf("%s: placing LIMIT order (%s), driftPct: %.4f", symbol, reason, driftPct)
+		_, err = c.PlaceLimitOrder(ctx, symbol, side, quantity, priceStr, reduceOnly, dryRun)
+		if err != nil && strings.Contains(err.Error(), "-4131") {
+			log.Printf("%s: limit price outside PERCENT_PRICE band, skipping this cycle", symbol)
+			return nil
+		}
+		return err
+
+	case hedger.ActionMarket:
+		// Cancel existing limit orders to avoid over-hedging
+		c.CancelAllOrders(ctx, symbol)
+		log.Printf("%s: placing MARKET order (%s), driftPct: %.4f", symbol, reason, driftPct)
+		_, err = c.PlaceMarketOrder(ctx, symbol, side, quantity, reduceOnly, dryRun)
+		return err
+	}
+
+	return nil
+}
+
+// GetOpenOrders lists active limit orders for the symbol.
+func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]*futures.Order, error) {
+	return c.futures.NewListOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// CancelAllOrders cancels all active orders for the symbol.
+func (c *Client) CancelAllOrders(ctx context.Context, symbol string) error {
+	return c.futures.NewCancelAllOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// GetMinNotional fetches the MIN_NOTIONAL filter for the symbol.
+func (c *Client) GetMinNotional(ctx context.Context, symbol string) (float64, error) {
+	info, err := c.futures.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("could not read exchange info: %w", err)
+	}
+	for _, s := range info.Symbols {
+		if s.Symbol == symbol {
+			for _, f := range s.Filters {
+				if f["filterType"] == "MIN_NOTIONAL" {
+					if val, ok := f["notional"].(string); ok {
+						return strconv.ParseFloat(val, 64)
+					}
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("MIN_NOTIONAL not found for %s", symbol)
+}
+
+// PlaceLimitOrder places a post-only limit order.
+func (c *Client) PlaceLimitOrder(
+	ctx context.Context,
+	symbol string,
+	side Side,
+	quantity string,
+	price string,
+	reduceOnly bool,
+	dryRun bool) (*futures.CreateOrderResponse, error) {
+
+	if dryRun {
+		log.Printf("[DRY RUN] would place LIMIT %s: %s %s @ %s (reduceOnly=%t)", side, quantity, symbol, price, reduceOnly)
+		return nil, nil
+	}
+
+	var binanceSide futures.SideType
+	switch side {
+	case SideBuy:
+		binanceSide = futures.SideTypeBuy
+	case SideSell:
+		binanceSide = futures.SideTypeSell
+	}
+
+	order, err := c.futures.NewCreateOrderService().
+		Symbol(symbol).
+		Side(binanceSide).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTX). // Post Only
+		Quantity(quantity).
+		Price(price).
+		ReduceOnly(reduceOnly).
+		NewOrderResponseType(futures.NewOrderRespTypeRESULT).
+		Do(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[LIVE] Placed LIMIT %s: %s %s @ %s -> orderID %d, status %s", side, quantity, symbol, price, order.OrderID, order.Status)
+	return order, nil
 }

@@ -6,6 +6,7 @@
   <title>LP Vol Analyzer — fees vs. volatility</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -36,6 +37,33 @@
       <span class="tracked-sub" id="tracked-sub"></span>
     </div>
     <div class="tracked-grid" id="tracked-grid"></div>
+
+    <div class="graphs-section" id="graphs-section" hidden style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem;">
+      <canvas id="pnl-chart" width="400" height="200"></canvas>
+    </div>
+  </section>
+
+  <section class="tracked" id="open-shorts-section" hidden>
+    <div class="tracked-head">
+      <h2>Open futures shorts</h2>
+      <span class="tracked-sub">All active positions on Binance</span>
+    </div>
+    <div class="table-wrap">
+      <table id="open-shorts-table" class="pools-table" style="width: 100%">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th class="num">Size</th>
+            <th class="num">Entry Price</th>
+            <th class="num">Mark Price</th>
+            <th class="num">Unrealized PnL</th>
+            <th class="num">Notional USD</th>
+          </tr>
+        </thead>
+        <tbody id="open-shorts-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <h2 class="section-title">Most profitable pools by chain</h2>
@@ -100,6 +128,6 @@
     <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Fee-implied σ = √(8·feeAPR).</span>
   </footer>
 
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

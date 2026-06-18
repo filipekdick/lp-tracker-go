@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
+	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 )
 
@@ -56,6 +57,8 @@ type TrackedPosition struct {
 	TickUpper   int64                `json:"tickUpper"`
 	TickNow     int64                `json:"tickNow"`
 	InRange     bool                 `json:"inRange"`
+	TokensOwed0 float64              `json:"tokensOwed0"`
+	TokensOwed1 float64              `json:"tokensOwed1"`
 
 	// Valuation and pool market data.
 	ValueUSD     float64 `json:"valueUsd"`
@@ -67,12 +70,28 @@ type TrackedPosition struct {
 	Analysis analyzer.Result `json:"analysis"`
 
 	// Hedge state.
-	Hedges []Hedge `json:"hedges"`
-	Hedge  Hedge   `json:"hedge"` // Backward compatibility for older client app.js versions cache
+	Hedges     []Hedge            `json:"hedges"`
+	Hedge      Hedge              `json:"hedge"` // Backward compatibility
+	OpenShorts []binance.Position `json:"openShorts"`
+
+	// History
+	InitialState *Snapshot  `json:"initialState"`
+	History      []Snapshot `json:"history"`
 
 	Source    string    `json:"source"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Error     string    `json:"error,omitempty"`
+}
+
+// Snapshot stores a historical data point for graphing and PnL tracking.
+type Snapshot struct {
+	Timestamp time.Time `json:"timestamp"`
+	Price0    float64   `json:"price0"`
+	Price1    float64   `json:"price1"`
+	ValueUSD  float64   `json:"valueUsd"`
+	HedgePnL  float64   `json:"hedgePnl"`
+	FeesUSD   float64   `json:"feesUsd"`
+	NetPnL    float64   `json:"netPnl"`
 }
 
 // Tracker produces the current state of a tracked position.

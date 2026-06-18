@@ -33,6 +33,7 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/api"
 	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 	"github.com/filipekdick/lp-tracker-go/internal/lp"
 	"github.com/filipekdick/lp-tracker-go/internal/position"
 	"github.com/filipekdick/lp-tracker-go/internal/scanner"
@@ -144,7 +145,12 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource)
 
 	base := datasource.Chain{Slug: "base", Display: "Base", Kind: datasource.L2}
 	dryRun := envStr("HEDGE_DRY_RUN", "true") != "false"
-	return position.NewLiveTracker(reader, gecko, implied, bn, tokenID, base, dryRun)
+
+	lower := envFloat("HEDGE_LIMIT_THRESHOLD", envFloat("HEDGE_DRIFT_THRESHOLD", 0.03))
+	upper := envFloat("HEDGE_MARKET_THRESHOLD", envFloat("HEDGE_DRIFT_THRESHOLD", 0.06))
+	strategy := &hedger.Strategy{LowerThreshold: lower, UpperThreshold: upper}
+
+	return position.NewLiveTracker(reader, gecko, implied, bn, tokenID, base, dryRun, strategy)
 }
 
 // resolveChains maps a comma-separated slug list onto the known chain set,
@@ -202,6 +208,15 @@ func envDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			return n
 		}
 	}
 	return def

@@ -187,6 +187,111 @@ function renderPosition() {
   </div>`;
 
   document.getElementById("tracked-grid").innerHTML = lp + hedge + fee;
+
+  const shortsSec = document.getElementById("open-shorts-section");
+  if (p.openShorts && p.openShorts.length > 0) {
+    shortsSec.hidden = false;
+    document.getElementById("open-shorts-body").innerHTML = p.openShorts.map(s => {
+      const side = s.size < 0 ? "SHORT" : "LONG";
+      const cls = s.unrealizedPnl >= 0 ? "ratio-pos" : "ratio-neg";
+      return `<tr>
+        <td>${s.symbol}</td>
+        <td>${side}</td>
+        <td class="num">${fmt.amount(Math.abs(s.size))}</td>
+        <td class="num">${fmt.price(s.entryPrice)}</td>
+        <td class="num">${fmt.price(s.markPrice)}</td>
+        <td class="num"><span class="${cls}">${fmt.usd(s.unrealizedPnl)}</span></td>
+        <td class="num">${fmt.usd(Math.abs(s.size) * s.markPrice)}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    shortsSec.hidden = true;
+  }
+
+  const graphsSec = document.getElementById("graphs-section");
+  if (p.initialState && p.history && p.history.length > 0) {
+    graphsSec.hidden = false;
+    
+    const cur = p.history[p.history.length - 1];
+    const netPnl = cur.netPnl;
+    const initialVal = Math.max(0.01, p.initialState.valueUsd);
+    const pct = (netPnl / initialVal) * 100;
+    
+    const msElapsed = new Date(cur.timestamp) - new Date(p.initialState.timestamp);
+    const days = msElapsed / (1000 * 3600 * 24);
+    let aprStr = "—";
+    if (days > 0.001) {
+      const apr = (pct / days) * 365;
+      aprStr = apr.toFixed(2) + "%";
+    }
+    
+    const pnlCls = netPnl >= 0 ? "ratio-pos" : "ratio-neg";
+    const pnlHtml = `<div style="display:flex; flex-wrap:wrap; gap:2rem; margin-bottom:1rem; padding:1rem; background:var(--bg-card); border-radius:8px; border:1px solid var(--border);">
+      <div style="flex:1;">
+        <h3 style="margin-top:0">Strategy Net Profit</h3>
+        <p class="hint">Since start (${new Date(p.initialState.timestamp).toLocaleString()})</p>
+      </div>
+      ${kv("Total PnL", `<span class="${pnlCls}">${fmt.usd(netPnl)}</span>`)}
+      ${kv("Return", `<span class="${pnlCls}">${pct.toFixed(2)}%</span>`)}
+      ${kv("APR", `<span class="${pnlCls}">${aprStr}</span>`)}
+      ${kv("Collected Fees", fmt.usd(cur.feesUsd))}
+    </div>`;
+
+    let canvasHtml = `<canvas id="pnl-chart" style="width:100%; height:250px;"></canvas>`;
+    graphsSec.innerHTML = pnlHtml + canvasHtml;
+    
+    renderChart(p.history);
+  } else {
+    graphsSec.hidden = true;
+  }
+}
+
+function renderChart(history) {
+  if (window.pnlChart) { window.pnlChart.destroy(); }
+  const ctx = document.getElementById('pnl-chart');
+  if (!ctx) return;
+  
+  const labels = history.map(h => new Date(h.timestamp).toLocaleTimeString());
+  const pnlData = history.map(h => h.netPnl);
+  const feesData = history.map(h => h.feesUsd);
+  
+  window.pnlChart = new Chart(ctx.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Net PnL (USD)',
+          data: pnlData,
+          borderColor: 'rgb(75, 192, 192)',
+          tension: 0.1,
+          borderWidth: 2,
+          pointRadius: 0
+        },
+        {
+          label: 'Fees (USD)',
+          data: feesData,
+          borderColor: 'rgb(255, 159, 64)',
+          tension: 0.1,
+          borderWidth: 2,
+          borderDash: [5, 5],
+          pointRadius: 0
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: { enabled: true }
+      },
+      scales: {
+        y: { ticks: { callback: function(value) { return '$' + value; } } }
+      }
+    }
+  });
 }
 
 function syncProtocolFilter() {

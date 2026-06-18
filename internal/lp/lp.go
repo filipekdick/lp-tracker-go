@@ -29,6 +29,8 @@ type PositionReport struct {
 	TickUpper   int64
 	TickNow     int64
 	InRange     bool
+	TokensOwed0 float64
+	TokensOwed1 float64
 }
 
 // Reader reades a LP position from one protocol, given its contract addresses.
@@ -164,6 +166,8 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 		TickUpper:   tickUpper,
 		TickNow:     tickNow,
 		InRange:     tickNow >= tickLower && tickNow <= tickUpper,
+		TokensOwed0: format.TokenAmount(position.TokensOwed0, dec0),
+		TokensOwed1: format.TokenAmount(position.TokensOwed1, dec1),
 	}, nil
 }
 

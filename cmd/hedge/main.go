@@ -107,7 +107,7 @@ func hedgeLeg(
 	log.Printf("%s in LP: %.6f -> target short on %s: %.6f",
 		lpSymbol, amount, futuresSymbol, amount)
 
-	err := bn.SyncShort(ctx, futuresSymbol, amount, minChange, dryRun)
+	err := bn.SyncShort(ctx, futuresSymbol, amount, minChange, dryRun, nil)
 	if errors.Is(err, binance.ErrSymbolNotFound) {
 		log.Printf("%s: not listed on this venue (likely testnet), skipping leg", futuresSymbol)
 		return

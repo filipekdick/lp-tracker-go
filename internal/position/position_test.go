@@ -33,7 +33,6 @@ func TestHedgeLegsMultiLeg(t *testing.T) {
 	}
 }
 
-
 func TestHedgeLegUnhedgeablePool(t *testing.T) {
 	// Two stablecoins -> nothing to hedge.
 	if _, _, _, ok := hedgeLeg("USDC", "DAI", 1, 1); ok {

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 	"github.com/filipekdick/lp-tracker-go/internal/lp"
 )
 
@@ -25,13 +27,18 @@ type poolPricer interface {
 // LiveTracker reads a position from chain, prices its pool via GeckoTerminal,
 // pulls implied vol from Deribit and reads the matching Binance short.
 type LiveTracker struct {
-	reader  poolReader
-	pricer  poolPricer
-	iv      datasource.ImpliedVolSource
-	bn      *binance.Client
-	tokenID int64
-	chain   datasource.Chain
-	dryRun  bool
+	reader   poolReader
+	pricer   poolPricer
+	iv       datasource.ImpliedVolSource
+	bn       *binance.Client
+	tokenID  int64
+	chain    datasource.Chain
+	dryRun   bool
+	strategy *hedger.Strategy
+
+	mu           sync.Mutex
+	initialState *Snapshot
+	history      []Snapshot
 }
 
 // NewLiveTracker wires the live data sources. bn may be nil, in which case the
@@ -44,15 +51,17 @@ func NewLiveTracker(
 	tokenID int64,
 	chain datasource.Chain,
 	dryRun bool,
+	strategy *hedger.Strategy,
 ) *LiveTracker {
 	return &LiveTracker{
-		reader:  reader,
-		pricer:  pricer,
-		iv:      iv,
-		bn:      bn,
-		tokenID: tokenID,
-		chain:   chain,
-		dryRun:  dryRun,
+		reader:   reader,
+		pricer:   pricer,
+		iv:       iv,
+		bn:       bn,
+		tokenID:  tokenID,
+		chain:    chain,
+		dryRun:   dryRun,
+		strategy: strategy,
 	}
 }
 
@@ -80,6 +89,8 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickUpper:   report.TickUpper,
 		TickNow:     report.TickNow,
 		InRange:     report.InRange,
+		TokensOwed0: report.TokensOwed0,
+		TokensOwed1: report.TokensOwed1,
 		Source:      "live",
 		UpdatedAt:   time.Now(),
 	}
@@ -103,6 +114,66 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	if len(tp.Hedges) > 0 {
 		tp.Hedge = tp.Hedges[0]
 	}
+
+	if t.bn != nil {
+		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
+			tp.OpenShorts = open
+		}
+	}
+
+	// Snapshot for history
+	snap := Snapshot{
+		Timestamp: tp.UpdatedAt,
+		Price0:    0,
+		Price1:    0,
+		ValueUSD:  tp.ValueUSD,
+		HedgePnL:  0,
+		FeesUSD:   0,
+		NetPnL:    0,
+	}
+
+	if rp.Address != "" {
+		snap.Price0 = rp.PriceUSD
+		snap.Price1 = rp.QuotePriceUSD
+		snap.FeesUSD = report.TokensOwed0*rp.PriceUSD + report.TokensOwed1*rp.QuotePriceUSD
+	}
+	for _, h := range tp.Hedges {
+		snap.HedgePnL += h.UnrealizedPnL
+	}
+	snap.NetPnL = snap.HedgePnL + snap.FeesUSD // simplified PnL
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.initialState == nil && tp.Error == "" && rp.Address != "" {
+		// First successful scan, capture baseline
+		t.initialState = &Snapshot{
+			Timestamp: snap.Timestamp,
+			Price0:    snap.Price0,
+			Price1:    snap.Price1,
+			ValueUSD:  snap.ValueUSD,
+			HedgePnL:  snap.HedgePnL,
+			FeesUSD:   snap.FeesUSD,
+			NetPnL:    0, // Initial net PnL is zero
+		}
+	}
+
+	if t.initialState != nil {
+		// Net PnL = Change in LP Value + Hedge PnL + Fees
+		lpChange := snap.ValueUSD - t.initialState.ValueUSD
+		snap.NetPnL = lpChange + snap.HedgePnL + snap.FeesUSD
+
+		t.history = append(t.history, snap)
+
+		// Optional: limit history size
+		if len(t.history) > 1000 {
+			t.history = t.history[len(t.history)-1000:]
+		}
+
+		tp.InitialState = t.initialState
+		tp.History = t.history
+	}
+
 	return tp, nil
 }
 
@@ -137,7 +208,7 @@ func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []He
 		}
 
 		// Perform the actual hedge sync if keys are present (SyncShort respects dryRun)
-		err := t.bn.SyncShort(ctx, leg.Perp, leg.Amount, 0.001, t.dryRun)
+		err := t.bn.SyncShort(ctx, leg.Perp, leg.Amount, 0.001, t.dryRun, t.strategy)
 		if err != nil {
 			log.Printf("[hedger] SyncShort failed for %s: %v", leg.Perp, err)
 		}

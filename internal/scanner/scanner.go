@@ -148,7 +148,14 @@ func (s *Scanner) scanOnce(ctx context.Context) {
 		}
 		raw, err := s.source.TopPools(ctx, []datasource.Chain{chain}, s.cfg.PerChain)
 		if err != nil {
-			log.Printf("[scanner] scan failed for chain %s: %v", chain.Slug, err)
+			errStr := err.Error()
+			if strings.Contains(strings.ToLower(errStr), "timeout") || strings.Contains(strings.ToLower(errStr), "deadline exceeded") {
+				log.Printf("[scanner] timeout for chain %s: %v", chain.Slug, err)
+			} else if strings.Contains(errStr, "429") || strings.Contains(strings.ToLower(errStr), "too many requests") {
+				log.Printf("[scanner] rate limited for chain %s: %v", chain.Slug, err)
+			} else {
+				log.Printf("[scanner] scan failed for chain %s: %v", chain.Slug, err)
+			}
 			s.mu.Lock()
 			s.failedChains = append(s.failedChains, chain)
 			s.snap.Error = fmt.Sprintf("failed to scan chains: %s", formatChainSlugs(s.failedChains))
@@ -231,7 +238,14 @@ func (s *Scanner) retryFailed(ctx context.Context) {
 
 		raw, err := s.source.TopPools(ctx, []datasource.Chain{chain}, s.cfg.PerChain)
 		if err != nil {
-			log.Printf("[scanner] retry failed for chain %s: %v", chain.Slug, err)
+			errStr := err.Error()
+			if strings.Contains(strings.ToLower(errStr), "timeout") || strings.Contains(strings.ToLower(errStr), "deadline exceeded") {
+				log.Printf("[scanner] retry timeout for chain %s: %v", chain.Slug, err)
+			} else if strings.Contains(errStr, "429") || strings.Contains(strings.ToLower(errStr), "too many requests") {
+				log.Printf("[scanner] retry rate limited for chain %s: %v", chain.Slug, err)
+			} else {
+				log.Printf("[scanner] retry failed for chain %s: %v", chain.Slug, err)
+			}
 			stillFailed = append(stillFailed, chain)
 			continue
 		}
