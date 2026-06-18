@@ -36,9 +36,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/scan", s.handleScan)
 
 	if s.static != nil {
-		mux.Handle("/", http.FileServer(http.FS(s.static)))
+		mux.Handle("/", noCache(http.FileServer(http.FS(s.static))))
 	}
 	return logging(mux)
+}
+
+// noCache forces the browser to revalidate static assets on every load. The
+// dashboard is embedded via embed.FS, which reports a zero modtime, so
+// http.FileServer sends no Last-Modified/ETag validators; without them a
+// browser may keep serving a stale index.html (and the old app.js it points
+// at) indefinitely. Disabling the cache guarantees a server restart always
+// ships the current UI.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

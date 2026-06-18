@@ -102,6 +102,17 @@ function renderSummary(meta) {
 
 function kv(k, v) { return `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`; }
 
+// driftCell renders the hedge drift as both base-asset units and a percentage
+// of the target short, coloured green when the hedge is in sync and red when it
+// has drifted — so it's obvious at a glance whether the sync is keeping up.
+function driftCell(h) {
+  const target = Math.abs(h.targetShort || 0);
+  const pct = target > 0 ? (h.drift / target) * 100 : 0;
+  const cls = h.inSync ? "ratio-pos" : "ratio-neg";
+  const sign = h.drift > 0 ? "+" : "";
+  return `<span class="${cls}">${sign}${fmt.amount(h.drift)} ${h.exposureSymbol} · ${sign}${pct.toFixed(2)}%</span>`;
+}
+
 function renderPosition() {
   const section = document.getElementById("tracked");
   const p = state.position;
@@ -149,7 +160,8 @@ function renderPosition() {
         ${kv("LP exposure", fmt.amount(h.lpExposure) + " " + h.exposureSymbol)}
         ${kv("Target short", fmt.amount(h.targetShort) + " " + h.exposureSymbol)}
         ${kv("Current short", h.available ? fmt.amount(h.currentShort) + " " + h.exposureSymbol : "—")}
-        ${kv("Drift", h.available ? fmt.amount(h.drift) : "—")}
+        ${kv("Drift", h.available ? driftCell(h) : "—")}
+        ${kv("Notional", h.available && h.notionalUsd ? fmt.usd(h.notionalUsd) : "—")}
         ${kv("Entry / mark", (h.entryPrice ? fmt.price(h.entryPrice) : "—") + " / " + (h.markPrice ? fmt.price(h.markPrice) : "—"))}
         ${kv("Short PnL", `<span class="${pnlCls}">${h.available ? fmt.usd(h.unrealizedPnl) : "—"}</span>`)}`;
     });
@@ -247,14 +259,25 @@ function renderPosition() {
 }
 
 function renderChart(history) {
-  if (window.pnlChart) { window.pnlChart.destroy(); }
   const ctx = document.getElementById('pnl-chart');
   if (!ctx) return;
-  
+
+  // Chart.js loads from a CDN; if it's blocked or still loading, degrade
+  // gracefully instead of throwing and aborting the whole render.
+  if (typeof Chart === "undefined") {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = "Chart.js could not be loaded (offline?) — graph unavailable.";
+    ctx.replaceWith(note);
+    return;
+  }
+
+  if (window.pnlChart) { window.pnlChart.destroy(); }
+
   const labels = history.map(h => new Date(h.timestamp).toLocaleTimeString());
   const pnlData = history.map(h => h.netPnl);
   const feesData = history.map(h => h.feesUsd);
-  
+
   window.pnlChart = new Chart(ctx.getContext('2d'), {
     type: 'line',
     data: {
@@ -266,7 +289,7 @@ function renderChart(history) {
           borderColor: 'rgb(75, 192, 192)',
           tension: 0.1,
           borderWidth: 2,
-          pointRadius: 0
+          pointRadius: 2
         },
         {
           label: 'Fees (USD)',
@@ -275,7 +298,7 @@ function renderChart(history) {
           tension: 0.1,
           borderWidth: 2,
           borderDash: [5, 5],
-          pointRadius: 0
+          pointRadius: 2
         }
       ]
     },

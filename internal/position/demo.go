@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 )
 
@@ -73,7 +74,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	hedge := buildHedge("WETH", "ETHUSDT", wethAmount, current, entryPrice, mark, true, true,
 		"Binance Futures (testnet) · demo")
 
-	return TrackedPosition{
+	tp := TrackedPosition{
 		TokenID:      t.tokenID,
 		Chain:        rp.Chain,
 		ChainSlug:    rp.ChainSlug,
@@ -99,7 +100,75 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		Hedge:        hedge,
 		Source:       "demo",
 		UpdatedAt:    time.Now(),
-	}, nil
+	}
+
+	// Synthetic open futures positions so the dashboard's "Open futures shorts"
+	// table has rows to show. The ETH leg mirrors the hedge above; the others
+	// give the table some variety.
+	tp.OpenShorts = demoOpenShorts(rng, current, entryPrice, mark)
+
+	// Synthetic strategy history so the Net-PnL/fees graph has a timeline to
+	// draw before any live scans land. Live tracking builds this incrementally;
+	// here we backfill a believable few hours in one shot.
+	tp.InitialState, tp.History = demoHistory(rng, closes, wethAmount, usdcAmount, current, entryPrice)
+
+	return tp, nil
+}
+
+// demoOpenShorts builds a handful of synthetic Binance positions for the
+// open-shorts table. Short PnL follows size*(mark-entry) (size is negative).
+func demoOpenShorts(rng *rand.Rand, ethShort, ethEntry, ethMark float64) []binance.Position {
+	shorts := []binance.Position{
+		{Symbol: "ETHUSDT", Size: -ethShort, EntryPrice: ethEntry, MarkPrice: ethMark},
+		{Symbol: "BTCUSDT", Size: -(0.04 + rng.Float64()*0.08), EntryPrice: 64000, MarkPrice: 64000 * (0.97 + rng.Float64()*0.06)},
+		{Symbol: "SOLUSDT", Size: -(8 + rng.Float64()*20), EntryPrice: 150, MarkPrice: 150 * (0.95 + rng.Float64()*0.1)},
+	}
+	for i := range shorts {
+		s := &shorts[i]
+		s.UnrealizedPnL = s.Size * (s.MarkPrice - s.EntryPrice)
+		s.LiquidationPrice = s.EntryPrice * 1.8 // rough short liquidation level
+	}
+	return shorts
+}
+
+// demoHistory backfills a few hours of strategy snapshots ending now, so the
+// graph paints a line on first load. NetPnL = LP value change + hedge PnL +
+// accrued fees, matching the live tracker's definition; the initial state is
+// the baseline (NetPnL zero).
+func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short, entry float64) (*Snapshot, []Snapshot) {
+	const n = 24
+	const step = 8 * time.Minute
+	if len(closes) < n {
+		return nil, nil
+	}
+	start := time.Now().Add(-(n - 1) * step)
+	tail := closes[len(closes)-n:]
+	value0 := wethAmount*tail[0] + usdcAmount
+	hedge0 := short * (entry - tail[0]) // baseline hedge PnL at inception
+
+	feesTotal := 6 + rng.Float64()*40 // USD of fees accrued over the window
+	hist := make([]Snapshot, 0, n)
+	for i := 0; i < n; i++ {
+		progress := float64(i) / float64(n-1)
+		price := tail[i]
+		value := wethAmount*price + usdcAmount
+		hedgePnL := short * (entry - price) // short gains as price falls
+		fees := feesTotal * progress
+		// Net PnL is the change since inception (see live.go), so the curve
+		// starts at zero rather than at the hedge's standing PnL.
+		hist = append(hist, Snapshot{
+			Timestamp: start.Add(time.Duration(i) * step),
+			Price0:    price,
+			Price1:    1,
+			ValueUSD:  value,
+			HedgePnL:  hedgePnL,
+			FeesUSD:   fees,
+			NetPnL:    (value - value0) + (hedgePnL - hedge0) + fees,
+		})
+	}
+	initial := hist[0]
+	initial.NetPnL = 0
+	return &initial, hist
 }
 
 // buildHedge assembles a Hedge from a target/current short and prices.
