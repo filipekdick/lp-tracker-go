@@ -133,9 +133,15 @@ function renderPosition() {
 
   // ---- derived position metrics --------------------------------------------
   const price0 = p.price0 || 0, price1 = p.price1 || 0;
-  const fees0 = (p.tokensOwed0 || 0) * price0;
-  const fees1 = (p.tokensOwed1 || 0) * price1;
+  // Uncollected = live claimable fees; collected = already withdrawn over the
+  // position's life. Fall back to the legacy tokensOwed alias if needed.
+  const unc0 = p.uncollectedFees0 != null ? p.uncollectedFees0 : (p.tokensOwed0 || 0);
+  const unc1 = p.uncollectedFees1 != null ? p.uncollectedFees1 : (p.tokensOwed1 || 0);
+  const col0 = p.collectedFees0 || 0, col1 = p.collectedFees1 || 0;
+  const fees0 = unc0 * price0, fees1 = unc1 * price1;
   const feesUsd = fees0 + fees1;
+  const colUsd0 = col0 * price0, colUsd1 = col1 * price1;
+  const collectedUsd = colUsd0 + colUsd1;
   const curV0 = (p.amount0 || 0) * price0;
   const curV1 = (p.amount1 || 0) * price1;
   const totalV = (curV0 + curV1) || p.valueUsd || 0;
@@ -175,9 +181,10 @@ function renderPosition() {
     </div>
     <div class="pcard">
       <div class="pcard-head"><span class="pcard-ico">🪙</span>Earning</div>
-      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd)}</div>
+      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd + collectedUsd)}</div>
       <div class="pcard-subs">
-        ${kv("Unclaimed fees", fmt.usd(feesUsd))}
+        ${kv("Unclaimed", fmt.usd(feesUsd))}
+        ${kv("Claimed", fmt.usd(collectedUsd))}
         ${kv("Pool fee APR", fmt.pct(a.feeApr))}
       </div>
     </div>
@@ -213,18 +220,18 @@ function renderPosition() {
     <p class="hint" style="margin-top:8px">Tick ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}) · Pool TVL ${fmt.usd(p.tvlUsd)}</p>
   </div>`;
 
-  // ---- Fees & Rewards (unclaimed vs claimed) -------------------------------
-  const feeRow = (sym, amt, usd) => `<div class="liq-row">
+  // ---- Fees & Rewards: unclaimed (uncollected) vs claimed (collected) ------
+  const feeRow = (sym, unAmt, unUsd, clAmt, clUsd) => `<div class="liq-row">
     <div class="liq-sym">${sym}</div>
-    <div class="liq-col"><span class="liq-amt">${fmt.amount(amt)}</span><span class="liq-usd">${fmt.usd(usd)}</span></div>
-    <div class="liq-col"><span class="liq-amt">0</span><span class="liq-usd">$0.00</span></div>
+    <div class="liq-col"><span class="liq-amt">${fmt.amount(unAmt)}</span><span class="liq-usd">${fmt.usd(unUsd)}</span></div>
+    <div class="liq-col"><span class="liq-amt">${fmt.amount(clAmt)}</span><span class="liq-usd">${fmt.usd(clUsd)}</span></div>
   </div>`;
   const feesRewards = `<div class="tcard">
     <h3>Fees &amp; Rewards</h3>
     <div class="liq-head"><span></span><span>Unclaimed</span><span>Claimed</span></div>
-    ${feeRow(p.symbol0, p.tokensOwed0 || 0, fees0)}
-    ${feeRow(p.symbol1, p.tokensOwed1 || 0, fees1)}
-    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
+    ${feeRow(p.symbol0, unc0, fees0, col0, colUsd0)}
+    ${feeRow(p.symbol1, unc1, fees1, col1, colUsd1)}
+    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd + collectedUsd)}</span></span></div>
   </div>`;
 
   // Hedge card.

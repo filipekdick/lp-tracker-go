@@ -75,24 +75,28 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	}
 
 	tp := TrackedPosition{
-		TokenID:     t.tokenID,
-		Chain:       t.chain.Display,
-		ChainSlug:   t.chain.Slug,
-		ChainKind:   t.chain.Kind,
-		PoolAddress: report.PoolAddress,
-		PoolName:    fmt.Sprintf("%s / %s", report.Symbol0, report.Symbol1),
-		Symbol0:     report.Symbol0,
-		Symbol1:     report.Symbol1,
-		Amount0:     report.Amount0,
-		Amount1:     report.Amount1,
-		TickLower:   report.TickLower,
-		TickUpper:   report.TickUpper,
-		TickNow:     report.TickNow,
-		InRange:     report.InRange,
-		TokensOwed0: report.TokensOwed0,
-		TokensOwed1: report.TokensOwed1,
-		Source:      "live",
-		UpdatedAt:   time.Now(),
+		TokenID:          t.tokenID,
+		Chain:            t.chain.Display,
+		ChainSlug:        t.chain.Slug,
+		ChainKind:        t.chain.Kind,
+		PoolAddress:      report.PoolAddress,
+		PoolName:         fmt.Sprintf("%s / %s", report.Symbol0, report.Symbol1),
+		Symbol0:          report.Symbol0,
+		Symbol1:          report.Symbol1,
+		Amount0:          report.Amount0,
+		Amount1:          report.Amount1,
+		TickLower:        report.TickLower,
+		TickUpper:        report.TickUpper,
+		TickNow:          report.TickNow,
+		InRange:          report.InRange,
+		UncollectedFees0: report.UncollectedFees0,
+		UncollectedFees1: report.UncollectedFees1,
+		CollectedFees0:   report.CollectedFees0,
+		CollectedFees1:   report.CollectedFees1,
+		TokensOwed0:      report.UncollectedFees0, // alias (back-compat)
+		TokensOwed1:      report.UncollectedFees1,
+		Source:           "live",
+		UpdatedAt:        time.Now(),
 	}
 
 	// Price the pool and run the fee-vs-volatility model. A pricing failure is
@@ -141,7 +145,7 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	if rp.Address != "" {
 		snap.Price0 = rp.PriceUSD
 		snap.Price1 = rp.QuotePriceUSD
-		snap.FeesUSD = report.TokensOwed0*rp.PriceUSD + report.TokensOwed1*rp.QuotePriceUSD
+		snap.FeesUSD = report.UncollectedFees0*rp.PriceUSD + report.UncollectedFees1*rp.QuotePriceUSD
 	}
 	for _, h := range tp.Hedges {
 		snap.HedgePnL += h.UnrealizedPnL
