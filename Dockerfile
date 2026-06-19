@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 
 # Compila o binário (ajuste o caminho se o ponto de entrada principal for em cmd/...)
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server/main.go
 
 # Estágio de Execução
 FROM alpine:latest
@@ -25,3 +25,4 @@ EXPOSE 8080
 
 # Executa o programa
 CMD ["./server"]
+
