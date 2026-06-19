@@ -441,16 +441,16 @@ function renderPosition() {
       ${kv("Collected Fees", fmt.usd(cur.feesUsd))}
     </div>`;
 
-    let canvasHtml = `<div id="pnl-chart-wrapper" style="position: relative; height: 250px; width: 100%;"><canvas id="pnl-chart"></canvas></div>`;
+    let canvasHtml = `<div id="pnl-chart-wrapper" style="position: relative; height: 340px; width: 100%;"><canvas id="pnl-chart"></canvas></div>`;
     graphsSec.innerHTML = pnlHtml + canvasHtml;
 
-    renderChart(p.history);
+    renderChart(p);
   } else {
     graphsSec.hidden = true;
   }
 }
 
-function renderChart(history) {
+function renderChart(p) {
   const ctx = document.getElementById("pnl-chart");
   if (!ctx) return;
 
@@ -469,31 +469,106 @@ function renderChart(history) {
     window.pnlChart.destroy();
   }
 
+  const history = p.history || [];
+  const sym0 = p.symbol0 || "Token 0";
+  const sym1 = p.symbol1 || "Token 1";
+  // Fees and net PnL are tracked as a *change* since inception (see live.go),
+  // so measure accrued fees against the baseline too — the curve then starts at
+  // zero like the PnL line. Falls back to the absolute balance if no baseline.
+  const baseFees = (p.initialState && p.initialState.feesUsd) || 0;
+
   const labels = history.map((h) => new Date(h.timestamp).toLocaleTimeString());
-  const pnlData = history.map((h) => h.netPnl);
-  const feesData = history.map((h) => h.feesUsd);
+  // Left axis: per-token USD value, stacked so the top of the band is the whole
+  // LP position's worth over time.
+  const token0Value = history.map((h) => (h.amount0 || 0) * (h.price0 || 0));
+  const token1Value = history.map((h) => (h.amount1 || 0) * (h.price1 || 0));
+  // Right axis: absolute USD lines.
+  const feesData = history.map((h) => (h.feesUsd || 0) - baseFees);
+  const pnlData = history.map((h) => h.netPnl || 0);
+  // The slice of PnL that fees don't explain is the residual from the LP and
+  // the hedge not staying perfectly in sync (impermanent loss + delta drift).
+  const lpHedgeDiff = history.map(
+    (h) => (h.netPnl || 0) - ((h.feesUsd || 0) - baseFees),
+  );
+
+  const usdAxis = (value) =>
+    "$" + value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  const usdTip = (value) =>
+    "$" +
+    value.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
 
   window.pnlChart = new Chart(ctx.getContext("2d"), {
     type: "line",
     data: {
       labels: labels,
       datasets: [
+        // ---- Left axis: stacked LP value -----------------------------------
+        {
+          label: `${sym0} value`,
+          data: token0Value,
+          yAxisID: "y",
+          stack: "lp",
+          fill: true,
+          backgroundColor: "rgba(56, 139, 253, 0.45)",
+          borderColor: "rgba(56, 139, 253, 0.9)",
+          borderWidth: 1,
+          tension: 0.3,
+          pointRadius: 0,
+          order: 3,
+        },
+        {
+          label: `${sym1} value`,
+          data: token1Value,
+          yAxisID: "y",
+          stack: "lp",
+          fill: true,
+          backgroundColor: "rgba(63, 185, 80, 0.45)",
+          borderColor: "rgba(63, 185, 80, 0.9)",
+          borderWidth: 1,
+          tension: 0.3,
+          pointRadius: 0,
+          order: 3,
+        },
+        // ---- Right axis: absolute USD lines --------------------------------
+        {
+          label: "Accrued fees (USD)",
+          data: feesData,
+          yAxisID: "y1",
+          borderColor: "rgb(255, 159, 64)",
+          backgroundColor: "rgb(255, 159, 64)",
+          tension: 0.3,
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          order: 1,
+        },
         {
           label: "Net PnL (USD)",
           data: pnlData,
-          borderColor: "rgb(75, 192, 192)",
-          tension: 0.1,
-          borderWidth: 2,
-          pointRadius: 2,
+          yAxisID: "y1",
+          borderColor: "rgb(45, 212, 191)",
+          backgroundColor: "rgb(45, 212, 191)",
+          tension: 0.3,
+          borderWidth: 2.5,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          order: 0,
         },
         {
-          label: "Fees (USD)",
-          data: feesData,
-          borderColor: "rgb(255, 159, 64)",
-          tension: 0.1,
+          label: "LP − hedge mismatch (USD)",
+          data: lpHedgeDiff,
+          yAxisID: "y1",
+          borderColor: "rgb(188, 140, 255)",
+          backgroundColor: "rgb(188, 140, 255)",
+          tension: 0.3,
           borderWidth: 2,
-          borderDash: [5, 5],
-          pointRadius: 2,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          order: 2,
         },
       ],
     },
@@ -503,16 +578,39 @@ function renderChart(history) {
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: { position: "top" },
-        tooltip: { enabled: true },
+        legend: { position: "top", labels: { boxWidth: 12, usePointStyle: true } },
+        tooltip: {
+          enabled: true,
+          callbacks: {
+            label: (c) => `${c.dataset.label}: ${usdTip(c.parsed.y)}`,
+            footer: (items) => {
+              // Show the full LP value (sum of the stacked legs) on hover.
+              const lp = items
+                .filter((i) => i.dataset.stack === "lp")
+                .reduce((s, i) => s + (i.parsed.y || 0), 0);
+              return items.some((i) => i.dataset.stack === "lp")
+                ? `Total LP value: ${usdTip(lp)}`
+                : "";
+            },
+          },
+        },
       },
       scales: {
         y: {
-          ticks: {
-            callback: function (value) {
-              return "$" + value;
-            },
-          },
+          type: "linear",
+          position: "left",
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "LP value (USD)" },
+          ticks: { callback: usdAxis },
+        },
+        y1: {
+          type: "linear",
+          position: "right",
+          stacked: false,
+          title: { display: true, text: "PnL / fees / mismatch (USD)" },
+          grid: { drawOnChartArea: false },
+          ticks: { callback: usdAxis },
         },
       },
     },
