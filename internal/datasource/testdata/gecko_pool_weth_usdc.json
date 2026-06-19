@@ -1,0 +1,49 @@
+{
+ "data": {
+  "attributes": {
+   "address": "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+   "base_token_price_usd": "3400",
+   "name": "WETH / USDC 0.05%",
+   "pool_fee_percentage": "0.05",
+   "quote_token_price_usd": "1",
+   "reserve_in_usd": "10000000",
+   "volume_usd": {
+    "h24": "5000000"
+   }
+  },
+  "id": "base_0x_weth_usdc",
+  "relationships": {
+   "base_token": {
+    "data": {
+     "id": "base_weth"
+    }
+   },
+   "dex": {
+    "data": {
+     "id": "aerodrome_slipstream"
+    }
+   },
+   "quote_token": {
+    "data": {
+     "id": "base_usdc"
+    }
+   }
+  }
+ },
+ "included": [
+  {
+   "attributes": {
+    "symbol": "WETH"
+   },
+   "id": "base_weth",
+   "type": "token"
+  },
+  {
+   "attributes": {
+    "symbol": "USDC"
+   },
+   "id": "base_usdc",
+   "type": "token"
+  }
+ ]
+}

@@ -13,7 +13,65 @@ const state = {
   sort: { key: "score", dir: -1 },
   selected: null, // "chainSlug/address"
   protocolsSeen: new Set(),
+  method: "close7d", // selected realized-volatility method
+  horizonDays: 1, // horizon T (days) for the ±σ range bands
 };
+
+// view returns the analysis fields for a pool under the currently selected
+// volatility method. The server precomputes every method (one OHLCV call per
+// pool) into analysis.methods; when that method is usable we read its sigma and
+// the metrics recomputed from it, otherwise we fall back to the legacy top-level
+// (7-day) fields so older payloads still render.
+function view(p) {
+  const a = (p && p.analysis) || {};
+  const m = a.methods && a.methods[state.method];
+  const base = {
+    feeApr: a.feeApr,
+    positionFeeApr: a.positionFeeApr,
+    impliedVol: a.impliedVol,
+    hasImplied: a.hasImplied,
+  };
+  if (m && m.ok) {
+    return Object.assign(base, {
+      realizedVol: m.realizedVol,
+      feeImpliedVol: m.feeImpliedVol,
+      lvrCost: m.lvrCost,
+      netEdgeApr: m.netEdgeApr,
+      feeYieldRatio: m.feeYieldRatio,
+      verdict: m.verdict,
+      optimalWidthPct: m.optimalWidthPct,
+      optimalNetEdgeApr: m.optimalNetEdgeApr,
+      ok: true,
+    });
+  }
+  return Object.assign(base, {
+    realizedVol: a.realizedVol,
+    feeImpliedVol: a.feeImpliedVol,
+    lvrCost: a.lvrCostRealized,
+    netEdgeApr: a.netEdgeApr,
+    feeYieldRatio: a.feeYieldRatio,
+    verdict: a.verdict,
+    optimalWidthPct: null,
+    optimalNetEdgeApr: null,
+    ok: a.realizedVol > 0,
+  });
+}
+
+// rangeBands returns the lognormal ±1σ and ±2σ containment bands for a sigma
+// over the selected horizon T (days): variance grows linearly in time so the
+// log half-width is z·σ·√(T/365); price bounds are multiplicative (exp), so the
+// up move is slightly larger in magnitude than the down move. These mirror the
+// server's analyzer.LognormalBands so the horizon toggle is instant.
+function rangeBands(sigma, T) {
+  if (!sigma || sigma <= 0 || !T || T <= 0) return null;
+  const s = sigma * Math.sqrt(T / 365);
+  return {
+    up1: Math.exp(s) - 1,
+    dn1: 1 - Math.exp(-s),
+    up2: Math.exp(2 * s) - 1,
+    dn2: 1 - Math.exp(-2 * s),
+  };
+}
 
 const fmt = {
   usd(n) {
@@ -93,7 +151,13 @@ function renderStatus(meta, poolsResp) {
 }
 
 function renderSummary(meta) {
-  const c = meta.counts || {};
+  // Recompute verdict counts client-side under the selected method, so the
+  // summary cards stay consistent with the table when the method changes.
+  const c = { attractive: 0, fair: 0, unattractive: 0, unknown: 0 };
+  for (const p of state.pools) {
+    const v = view(p).verdict || "unknown";
+    if (c[v] != null) c[v]++;
+  }
   const total = state.pools.length;
   const cards = [
     { k: "Pools tracked", v: total, cls: "" },
@@ -137,6 +201,33 @@ function driftCell(h) {
   const cls = h.inSync ? "ratio-pos" : "ratio-neg";
   const sign = h.drift > 0 ? "+" : "";
   return `<span class="${cls}">${sign}${fmt.amount(h.drift)} ${h.exposureSymbol} · ${sign}${pct.toFixed(2)}%</span>`;
+}
+
+// rangeCard renders the tracked position's actual range as notional prices,
+// derived on the server from tickLower/tickUpper via internal/v3math (no API
+// calls). within-range reads 0% at the lower tick and 100% at the upper tick.
+function rangeCard(p) {
+  if (!p || p.tickLower == null || p.tickUpper == null) return "";
+  const lo = p.rangeLowerPrice,
+    hi = p.rangeUpperPrice,
+    cur = p.rangeCurrentPrice;
+  let within = p.rangePositionPct;
+  if (within == null && p.tickUpper !== p.tickLower) {
+    within = ((p.tickNow - p.tickLower) / (p.tickUpper - p.tickLower)) * 100;
+  }
+  const clamped = Math.max(0, Math.min(100, within == null ? 0 : within));
+  const rangePill = p.inRange
+    ? '<span class="pill in">in range</span>'
+    : '<span class="pill out">out of range</span>';
+  return `<div class="tcard">
+    <h3>Position range ${rangePill}</h3>
+    ${kv(`Lower price (${p.symbol1}/${p.symbol0})`, lo != null ? fmt.price(lo) : "—")}
+    ${kv("Current price", cur != null ? fmt.price(cur) : "—")}
+    ${kv("Upper price", hi != null ? fmt.price(hi) : "—")}
+    ${kv("Within range", within == null ? "—" : clamped.toFixed(1) + "%")}
+    <div class="bar-track" style="margin-top:8px"><span class="bar-fill realized" style="width:${clamped}%"></span></div>
+    <p class="hint" style="margin-top:8px">Ticks ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}). Prices derived from on-chain ticks — no API calls.</p>
+  </div>`;
 }
 
 function renderPosition() {
@@ -327,19 +418,37 @@ function renderPosition() {
     ${notes ? `<p class="hint" style="margin-top:8px">${anyDryRun ? "🔒 dry-run · " : ""}${notes}</p>` : ""}
   </div>`;
 
-  // Fee-vs-volatility card with comparison bars.
+  // Fee-vs-volatility card with comparison bars (uses the selected σ method).
+  const av = view(p);
   const vols = [
-    { label: "Fee-implied σ", val: a.feeImpliedVol, cls: "fees" },
-    { label: "Realized σ", val: a.realizedVol, cls: "realized" },
+    { label: "Fee-implied σ", val: av.feeImpliedVol, cls: "fees" },
+    { label: "Realized σ", val: av.realizedVol, cls: "realized" },
   ];
-  if (a.hasImplied)
-    vols.push({ label: "Deribit IV", val: a.impliedVol, cls: "implied" });
+  if (av.hasImplied)
+    vols.push({ label: "Deribit IV", val: av.impliedVol, cls: "implied" });
   const maxVol = Math.max(...vols.map((v) => v.val || 0), 0.0001);
-  const verdictCls = a.verdict || "unknown";
+  const verdictCls = av.verdict || "unknown";
+  const pb = rangeBands(av.realizedVol, state.horizonDays);
+  const Tlbl = state.horizonDays < 1 ? state.horizonDays * 24 + "h" : state.horizonDays + "d";
+  const bandLine = pb
+    ? kv(
+        `Ideal range ±1σ / ${Tlbl}`,
+        `<span class="ratio-pos">+${fmt.pct(pb.up1)}</span> / <span class="ratio-neg">-${fmt.pct(pb.dn1)}</span>`,
+      )
+    : "";
+  const optLine =
+    av.optimalWidthPct != null
+      ? kv(
+          "Profit-optimal width",
+          `±${fmt.pct(av.optimalWidthPct)} · edge ${fmt.pct(av.optimalNetEdgeApr)}`,
+        )
+      : "";
   const fee = `<div class="tcard">
-    <h3>Fees vs. volatility <span class="verdict ${verdictCls}">${a.verdict || "—"}</span></h3>
-    ${kv("Fee APR", fmt.pct(a.positionFeeApr || a.feeApr))}
-    ${kv("Net edge APR", `<span class="${(a.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.netEdgeApr)}</span>`)}
+    <h3>Fees vs. volatility <span class="verdict ${verdictCls}">${av.verdict || "—"}</span></h3>
+    ${kv("Fee APR", fmt.pct(av.positionFeeApr || av.feeApr))}
+    ${kv("Net edge APR", `<span class="${(av.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(av.netEdgeApr)}</span>`)}
+    ${bandLine}
+    ${optLine}
     <div class="bars" style="margin-top:10px">
       ${vols
         .map(
@@ -350,11 +459,12 @@ function renderPosition() {
         )
         .join("")}
     </div>
+    <p class="hint" style="margin-top:8px">±σ bands are a containment target (≈68%/≈95%), not a profit-optimal width.</p>
   </div>`;
 
   document.getElementById("position-summary").innerHTML = summaryCards;
   document.getElementById("tracked-grid").innerHTML =
-    liq + feesRewards + hedge + fee;
+    liq + feesRewards + hedge + fee + rangeCard(p);
 
   const shortsSec = document.getElementById("open-shorts-section");
   if (p.openShorts && p.openShorts.length > 0) {
@@ -666,6 +776,7 @@ function countdown() {
 // ---- table -----------------------------------------------------------------
 
 function sortKey(p) {
+  const a = view(p);
   switch (state.sort.key) {
     case "name":
       return p.name.toLowerCase();
@@ -676,19 +787,27 @@ function sortKey(p) {
     case "vol":
       return p.volume24hUsd;
     case "feeApr":
-      return p.analysis.feeApr;
+      return a.feeApr;
     case "realizedVol":
-      return p.analysis.realizedVol;
+      return a.realizedVol;
     case "feeImpliedVol":
-      return p.analysis.feeImpliedVol;
+      return a.feeImpliedVol;
+    case "band1": {
+      const b = rangeBands(a.realizedVol, state.horizonDays);
+      return b ? b.up1 : -1;
+    }
     case "netEdge":
-      return p.analysis.netEdgeApr;
+      return a.netEdgeApr;
     case "ratio":
-      return p.analysis.feeYieldRatio;
+      return a.feeYieldRatio;
+    case "optWidth":
+      return a.optimalWidthPct == null ? -1 : a.optimalWidthPct;
+    case "optEdge":
+      return a.optimalNetEdgeApr == null ? -Infinity : a.optimalNetEdgeApr;
     case "verdict":
-      return p.analysis.verdict;
+      return a.verdict;
     default:
-      return p.analysis.score;
+      return (p.analysis && p.analysis.score) || 0;
   }
 }
 
@@ -696,7 +815,7 @@ function visiblePools() {
   const f = state.filters;
   let pools = state.pools.filter((p) => {
     if (f.kind && p.chainKind !== f.kind) return false;
-    if (f.verdict && p.analysis.verdict !== f.verdict) return false;
+    if (f.verdict && view(p).verdict !== f.verdict) return false;
     if (f.protocol && p.protocol !== f.protocol) return false;
     if (f.search) {
       const hay = (
@@ -735,9 +854,17 @@ function renderTable() {
 
   body.innerHTML = pools
     .map((p) => {
-      const a = p.analysis;
+      const a = view(p);
       const ratioCls = a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg";
       const edgeCls = a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg";
+      const b = rangeBands(a.realizedVol, state.horizonDays);
+      const bandCell = b
+        ? `<span class="ratio-pos">+${fmt.pct(b.up1)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn1)}</span>`
+        : "—";
+      const optWidth =
+        a.optimalWidthPct != null ? "±" + fmt.pct(a.optimalWidthPct) : "—";
+      const optEdge = a.optimalNetEdgeApr != null ? fmt.pct(a.optimalNetEdgeApr) : "—";
+      const optEdgeCls = (a.optimalNetEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg";
       const sel = poolId(p) === state.selected ? " selected" : "";
       return `<tr class="row${sel}" data-id="${poolId(p)}">
         <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.protocol || p.dex}</span></div></td>
@@ -747,8 +874,11 @@ function renderTable() {
         <td class="num">${fmt.pct(a.positionFeeApr || a.feeApr)}</td>
         <td class="num">${fmt.pct(a.realizedVol)}</td>
         <td class="num">${fmt.pct(a.feeImpliedVol)}</td>
+        <td class="num">${bandCell}</td>
         <td class="num ${edgeCls}">${fmt.pct(a.netEdgeApr)}</td>
         <td class="num ${ratioCls}">${fmt.ratio(a.feeYieldRatio)}</td>
+        <td class="num">${optWidth}</td>
+        <td class="num ${optEdgeCls}">${optEdge}</td>
         <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
       </tr>`;
     })
@@ -780,7 +910,12 @@ function renderDetail(p) {
   empty.hidden = true;
   content.hidden = false;
 
-  const a = p.analysis;
+  const a = view(p);
+  const methodLabel = {
+    close7d: "Close/close · 7d",
+    close14d: "Close/close · 14d",
+    gk: "Garman-Klass · 14d",
+  }[state.method];
   const vols = [
     { label: "Fee-implied σ", val: a.feeImpliedVol, cls: "fees" },
     { label: "Realized σ", val: a.realizedVol, cls: "realized" },
@@ -792,6 +927,26 @@ function renderDetail(p) {
       cls: "implied",
     });
   const maxVol = Math.max(...vols.map((v) => v.val), 0.0001);
+
+  const b = rangeBands(a.realizedVol, state.horizonDays);
+  const T = state.horizonDays;
+  const Tlabel = T < 1 ? T * 24 + "h" : T + "d";
+  const bandsHtml = b
+    ? `<div class="bars-title" title="Lognormal containment band over T=${Tlabel}. This is a containment target (≈68% / ≈95%), NOT a profit-optimal width.">Ideal range — ±σ containment over ${Tlabel}</div>
+       <div class="metric-grid">
+         <div class="metric"><div class="k">±1σ (≈68%)</div><div class="v"><span class="ratio-pos">+${fmt.pct(b.up1)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn1)}</span></div></div>
+         <div class="metric"><div class="k">±2σ (≈95%)</div><div class="v"><span class="ratio-pos">+${fmt.pct(b.up2)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn2)}</span></div></div>
+       </div>`
+    : "";
+
+  const optHtml =
+    a.optimalWidthPct != null
+      ? `<div class="bars-title" title="Profit-optimal concentrated width: maximises amplified fees − amplified LVR − amortised rebalancing cost. Distinct from the containment band above.">Profit-optimal concentrated range</div>
+       <div class="metric-grid">
+         <div class="metric"><div class="k">Optimal half-width</div><div class="v">±${fmt.pct(a.optimalWidthPct)}</div></div>
+         <div class="metric"><div class="k">Net edge @ optimum</div><div class="v ${(a.optimalNetEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.optimalNetEdgeApr)}</div></div>
+       </div>`
+      : "";
 
   const verdictText = {
     attractive:
@@ -805,6 +960,7 @@ function renderDetail(p) {
   content.innerHTML = `
     <h2>${p.name}</h2>
     <div class="sub">${p.dex} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · fee ${fmt.pct(p.feeTier)}</div>
+    <div class="sub">σ method: <strong>${methodLabel}</strong></div>
 
     <div class="verdict-banner ${a.verdict}">
       <strong style="text-transform:capitalize">${a.verdict}.</strong> ${verdictText}
@@ -814,8 +970,11 @@ function renderDetail(p) {
       <div class="metric"><div class="k">Fee APR</div><div class="v" title="Pool-wide APR: ${fmt.pct(a.feeApr)}">${fmt.pct(a.positionFeeApr || a.feeApr)}</div></div>
       <div class="metric"><div class="k">Fee / Vol ratio</div><div class="v ${a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg"}">${fmt.ratio(a.feeYieldRatio)}</div></div>
       <div class="metric"><div class="k">Net edge APR</div><div class="v ${a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.netEdgeApr)}</div></div>
-      <div class="metric"><div class="k">LVR cost (σ²⁄8)</div><div class="v">${fmt.pct(a.lvrCostRealized)}</div></div>
+      <div class="metric"><div class="k">LVR cost (σ²⁄8)</div><div class="v">${fmt.pct(a.lvrCost)}</div></div>
     </div>
+
+    ${bandsHtml}
+    ${optHtml}
 
     <div class="bars-title">Volatility comparison (annualized)</div>
     <div class="bars">
@@ -872,6 +1031,25 @@ function sparkline(closes) {
 // ---- wiring ----------------------------------------------------------------
 
 function wireControls() {
+  document.querySelectorAll("#method-filters .chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.method = b.dataset.method;
+      setActive("#method-filters", b);
+      renderSummary(state.meta || {});
+      renderTable();
+      renderPosition();
+      if (state.selected) renderDetail(findSelected());
+    });
+  });
+  document.querySelectorAll("#horizon-filters .chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.horizonDays = parseFloat(b.dataset.horizon);
+      setActive("#horizon-filters", b);
+      renderTable();
+      renderPosition();
+      if (state.selected) renderDetail(findSelected());
+    });
+  });
   document.querySelectorAll("#kind-filters .chip").forEach((b) => {
     b.addEventListener("click", () => {
       state.filters.kind = b.dataset.kind;

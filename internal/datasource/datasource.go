@@ -9,6 +9,8 @@ package datasource
 import (
 	"context"
 	"strings"
+
+	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 )
 
 // ChainKind distinguishes settlement layers.
@@ -58,8 +60,17 @@ type RawPool struct {
 
 	// Closes holds historical base-asset close prices, oldest first, used to
 	// measure realised volatility. PeriodsPerYear records their sampling rate.
+	// Closes is the 7-day (168-bar) tail, preserved so the default analysis is
+	// unchanged and the dashboard sparkline stays 7d.
 	Closes         []float64 `json:"closes"`
 	PeriodsPerYear float64   `json:"periodsPerYear"`
+
+	// OHLC holds the full OHLCV history (oldest first), long enough for the
+	// longest volatility window (14 days). It is fetched in the SAME single
+	// OHLCV request that produces Closes, and feeds the selectable volatility
+	// methods. Not serialised to clients (they receive precomputed metrics) to
+	// keep the API payload small.
+	OHLC []analyzer.OHLCV `json:"-"`
 }
 
 // ProtocolFamily normalises a provider DEX id into a human-readable protocol

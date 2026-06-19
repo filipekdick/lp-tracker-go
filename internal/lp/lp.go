@@ -25,6 +25,8 @@ type PositionReport struct {
 	PoolAddress string
 	Symbol0     string
 	Symbol1     string
+	Decimals0   uint8
+	Decimals1   uint8
 	Amount0     float64
 	Amount1     float64
 	TickLower   int64
@@ -165,6 +167,8 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 		PoolAddress: poolAddr.Hex(),
 		Symbol0:     sym0,
 		Symbol1:     sym1,
+		Decimals0:   dec0,
+		Decimals1:   dec1,
 		Amount0:     format.TokenAmount(amount0, dec0),
 		Amount1:     format.TokenAmount(amount1, dec1),
 		TickLower:   tickLower,

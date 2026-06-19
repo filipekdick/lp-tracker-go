@@ -90,6 +90,8 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickUpper:        report.TickUpper,
 		TickNow:          report.TickNow,
 		InRange:          report.InRange,
+		Decimals0:        report.Decimals0,
+		Decimals1:        report.Decimals1,
 		UncollectedFees0: report.UncollectedFees0,
 		UncollectedFees1: report.UncollectedFees1,
 		TokensOwed0:      report.UncollectedFees0, // alias (back-compat)
@@ -127,6 +129,8 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 			}
 		}
 	}
+
+	tp.fillRangePrices()
 
 	tp.Hedges = t.hedges(ctx, report)
 	if len(tp.Hedges) > 0 {

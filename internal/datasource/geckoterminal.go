@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 )
 
 // geckoBaseURL is the public GeckoTerminal API v2 root. Override via the
@@ -130,7 +132,7 @@ func (g *GeckoTerminal) toRawPool(ctx context.Context, chain Chain, d poolData, 
 		quote = s
 	}
 
-	closes, ppy := g.priceHistory(ctx, chain.Slug, a.Address)
+	closes, ohlc, ppy := g.priceHistory(ctx, chain.Slug, a.Address)
 
 	return RawPool{
 		Chain:          chain.Display,
@@ -148,33 +150,60 @@ func (g *GeckoTerminal) toRawPool(ctx context.Context, chain Chain, d poolData, 
 		PriceUSD:       parseFloat(a.BaseTokenPriceUSD),
 		QuotePriceUSD:  parseFloat(a.QuoteTokenPriceUSD),
 		Closes:         closes,
+		OHLC:           ohlc,
 		PeriodsPerYear: ppy,
 	}, true
 }
 
-// priceHistory returns up to 7 days of hourly closes (oldest first) and the
-// matching periods-per-year. On failure it returns nil closes so the analyzer
-// simply skips realised volatility for that pool.
-func (g *GeckoTerminal) priceHistory(ctx context.Context, slug, address string) ([]float64, float64) {
+// priceHistory issues a SINGLE OHLCV request covering 14 days of hourly bars and
+// derives everything from it: the full OHLC slice (for the selectable volatility
+// methods) and the 7-day close tail (preserving the legacy default analysis and
+// the dashboard sparkline). Fetching 14 days once is what keeps every method
+// within the one-request-per-pool GeckoTerminal budget. On failure it returns
+// nil so the analyzer simply skips realised volatility for that pool.
+//
+// 14 days hourly = 336 bars, the max GeckoTerminal returns per call (limit=336).
+func (g *GeckoTerminal) priceHistory(ctx context.Context, slug, address string) ([]float64, []analyzer.OHLCV, float64) {
 	var resp ohlcvResponse
-	url := fmt.Sprintf("%s/networks/%s/pools/%s/ohlcv/hour?aggregate=1&limit=168&currency=usd", g.baseURL, slug, address)
+	url := fmt.Sprintf("%s/networks/%s/pools/%s/ohlcv/hour?aggregate=1&limit=336&currency=usd", g.baseURL, slug, address)
 	if err := g.getJSON(ctx, url, &resp); err != nil {
-		return nil, 0
+		return nil, nil, 0
 	}
 	rows := resp.Data.Attributes.OHLCVList
 	if len(rows) < 3 {
-		return nil, 0
+		return nil, nil, 0
 	}
 	// Each row is [timestamp, open, high, low, close, volume]; sort ascending.
 	sort.Slice(rows, func(i, j int) bool { return rows[i][0] < rows[j][0] })
+
+	ohlc := make([]analyzer.OHLCV, 0, len(rows))
 	closes := make([]float64, 0, len(rows))
 	for _, r := range rows {
-		if len(r) >= 5 && r[4] > 0 {
+		if len(r) < 6 {
+			continue
+		}
+		ohlc = append(ohlc, analyzer.OHLCV{
+			Time:   int64(r[0]),
+			Open:   r[1],
+			High:   r[2],
+			Low:    r[3],
+			Close:  r[4],
+			Volume: r[5],
+		})
+		if r[4] > 0 {
 			closes = append(closes, r[4])
 		}
 	}
+
+	// Preserve the legacy 7-day (168-bar) close tail so the default analysis and
+	// the sparkline are unchanged.
+	const sevenDay = 7 * 24
+	if len(closes) > sevenDay {
+		closes = closes[len(closes)-sevenDay:]
+	}
+
 	const hoursPerYear = 24 * 365
-	return closes, hoursPerYear
+	return closes, ohlc, hoursPerYear
 }
 
 func (g *GeckoTerminal) getJSON(ctx context.Context, url string, dst any) error {

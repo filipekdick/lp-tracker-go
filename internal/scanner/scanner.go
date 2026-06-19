@@ -353,6 +353,7 @@ func (s *Scanner) analyze(ctx context.Context, raw []datasource.RawPool) []Analy
 			Volume24hUSD:   rp.Volume24hUSD,
 			Closes:         rp.Closes,
 			PeriodsPerYear: rp.PeriodsPerYear,
+			Bars:           rp.OHLC,
 		}
 		if s.implied != nil {
 			if iv, ok := s.implied.ImpliedVol(ctx, rp.BaseSymbol); ok {

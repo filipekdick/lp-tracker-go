@@ -17,7 +17,19 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/v3math"
 )
+
+// fillRangePrices populates the notional-price range fields from the position's
+// ticks and token decimals via internal/v3math. Display-only, no network/chain
+// access. Safe to call once the ticks and decimals are set.
+func (tp *TrackedPosition) fillRangePrices() {
+	info := v3math.RangePrices(tp.TickLower, tp.TickUpper, tp.TickNow, tp.Decimals0, tp.Decimals1)
+	tp.RangeLowerPrice = info.LowerPrice
+	tp.RangeUpperPrice = info.UpperPrice
+	tp.RangeCurrentPrice = info.CurrentPrice
+	tp.RangePositionPct = info.WithinPct
+}
 
 // Hedge describes the perp short that offsets a position's volatile-leg exposure.
 type Hedge struct {
@@ -57,6 +69,16 @@ type TrackedPosition struct {
 	TickUpper   int64                `json:"tickUpper"`
 	TickNow     int64                `json:"tickNow"`
 	InRange     bool                 `json:"inRange"`
+	Decimals0   uint8                `json:"decimals0"`
+	Decimals1   uint8                `json:"decimals1"`
+
+	// Range as notional prices, derived from the ticks + decimals via
+	// internal/v3math (display-only, no API/chain calls). RangePositionPct reads
+	// 0% at the lower bound and 100% at the upper bound.
+	RangeLowerPrice   float64 `json:"rangeLowerPrice"`
+	RangeUpperPrice   float64 `json:"rangeUpperPrice"`
+	RangeCurrentPrice float64 `json:"rangeCurrentPrice"`
+	RangePositionPct  float64 `json:"rangePositionPct"`
 
 	// Uncollected (live claimable) fees. TokensOwed0/1 are kept as a back-compat
 	// alias of the uncollected amounts.
@@ -173,6 +195,7 @@ func runAnalysis(ctx context.Context, rp datasource.RawPool, iv datasource.Impli
 		Volume24hUSD:   rp.Volume24hUSD,
 		Closes:         rp.Closes,
 		PeriodsPerYear: rp.PeriodsPerYear,
+		Bars:           rp.OHLC,
 	}
 	if iv != nil {
 		if v, ok := iv.ImpliedVol(ctx, rp.BaseSymbol); ok {

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/binance"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 )
@@ -36,8 +37,10 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		feeTier    = 0.0005 // 5 bps Aerodrome slipstream pool
 	)
 
-	// 7 days of hourly WETH prices ending near the live mark.
-	closes := geometricBrownianDemo(rng, entryPrice, ethVol, 168)
+	// 14 days of hourly WETH OHLC ending near the live mark (one window, used for
+	// all volatility methods); the 7-day close tail drives the legacy default.
+	ohlc := geometricBrownianDemoOHLC(rng, entryPrice, ethVol, 14*24)
+	closes := closesTailDemo(ohlc, 7*24)
 	mark := closes[len(closes)-1]
 
 	// Position sits in a ±8% range around the entry; currently in range.
@@ -64,6 +67,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		PriceUSD:       mark,
 		QuotePriceUSD:  1,
 		Closes:         closes,
+		OHLC:           ohlc,
 		PeriodsPerYear: 24 * 365,
 	}
 
@@ -91,6 +95,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TickUpper:   -199_800,
 		TickNow:     -200_600,
 		InRange:     true,
+		Decimals0:   18, // WETH
+		Decimals1:   6,  // USDC
 		// Synthetic live claimable fees.
 		UncollectedFees0: 0.0042 + rng.Float64()*0.002,
 		UncollectedFees1: 8 + rng.Float64()*6,
@@ -108,6 +114,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		Source:           "demo",
 		UpdatedAt:        time.Now(),
 	}
+
+	tp.fillRangePrices()
 
 	// Synthetic open futures positions so the dashboard's "Open futures shorts"
 	// table has rows to show. The ETH leg mirrors the hedge above; the others
@@ -221,19 +229,46 @@ func buildHedge(asset, perp string, target, current, entry, mark float64, dryRun
 	return h
 }
 
-// geometricBrownianDemo mirrors the datasource GBM generator for the tracker's
-// own use (kept local so the package has no test-only export coupling).
-func geometricBrownianDemo(rng *rand.Rand, p0, annualVol float64, n int) []float64 {
+// geometricBrownianDemoOHLC mirrors the datasource GBM OHLC generator for the
+// tracker's own use (kept local so the package has no test-only export
+// coupling). Bar highs/lows use the exact Brownian-bridge extremes so the
+// range-based volatility method is unbiased on demo data too.
+func geometricBrownianDemoOHLC(rng *rand.Rand, p0, annualVol float64, n int) []analyzer.OHLCV {
 	const hoursPerYear = 24 * 365
-	dt := 1.0 / hoursPerYear
-	sigmaStep := annualVol * math.Sqrt(dt)
-	closes := make([]float64, 0, n)
-	p := p0
+	w := annualVol * annualVol / hoursPerYear
+	sd := math.Sqrt(w)
+	bars := make([]analyzer.OHLCV, 0, n)
+	x := math.Log(p0)
 	for i := 0; i < n; i++ {
-		p *= math.Exp(-0.5*sigmaStep*sigmaStep + rng.NormFloat64()*sigmaStep)
-		closes = append(closes, p)
+		a := x
+		b := x + (-0.5*w + rng.NormFloat64()*sd)
+		qh := -(w / 2) * math.Log(rng.Float64())
+		high := 0.5 * ((a + b) + math.Sqrt((a-b)*(a-b)+4*qh))
+		ql := -(w / 2) * math.Log(rng.Float64())
+		low := 0.5 * ((a + b) - math.Sqrt((a-b)*(a-b)+4*ql))
+		bars = append(bars, analyzer.OHLCV{
+			Time:   int64(i),
+			Open:   math.Exp(a),
+			High:   math.Exp(high),
+			Low:    math.Exp(low),
+			Close:  math.Exp(b),
+			Volume: 1_000 + rng.Float64()*1_000_000,
+		})
+		x = b
 	}
-	return closes
+	return bars
+}
+
+// closesTailDemo returns the last n closes from a bar slice (oldest first).
+func closesTailDemo(bars []analyzer.OHLCV, n int) []float64 {
+	if n > len(bars) {
+		n = len(bars)
+	}
+	out := make([]float64, 0, n)
+	for _, b := range bars[len(bars)-n:] {
+		out = append(out, b.Close)
+	}
+	return out
 }
 
 func (t *DemoTracker) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
