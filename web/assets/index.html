@@ -94,6 +94,19 @@
   <h2 class="section-title">Most profitable pools by chain</h2>
 
   <section class="controls">
+    <div class="filter-group" id="method-filters" title="Realized-volatility estimator. All three are computed from one OHLCV request per pool.">
+      <span class="filter-label">σ method:</span>
+      <button class="chip active" data-method="close7d">Close 7d</button>
+      <button class="chip" data-method="close14d">Close 14d</button>
+      <button class="chip" data-method="gk">Garman-Klass</button>
+    </div>
+    <div class="filter-group" id="horizon-filters" title="Horizon T for the ±σ containment bands (lognormal, scaled by √T). These bands are a containment target, NOT a profit-optimal width — see the Opt. width column for that.">
+      <span class="filter-label">range T:</span>
+      <button class="chip" data-horizon="0.5">12h</button>
+      <button class="chip active" data-horizon="1">1d</button>
+      <button class="chip" data-horizon="3">3d</button>
+      <button class="chip" data-horizon="7">7d</button>
+    </div>
     <div class="filter-group" id="kind-filters">
       <button class="chip active" data-kind="">All layers</button>
       <button class="chip" data-kind="L1">L1</button>
@@ -127,8 +140,11 @@
             <th data-sort="feeApr" class="num">Fee APR</th>
             <th data-sort="realizedVol" class="num">Realized σ</th>
             <th data-sort="feeImpliedVol" class="num">Fee-implied σ</th>
+            <th data-sort="band1" class="num" title="±1σ containment band over horizon T (≈68%). Containment target, not profit-optimal width.">Range ±1σ</th>
             <th data-sort="netEdge" class="num">Net edge</th>
             <th data-sort="ratio" class="num">Fee/Vol</th>
+            <th data-sort="optWidth" class="num" title="Profit-optimal concentrated range half-width: maximises amplified fees − amplified LVR − rebalancing cost.">Opt. width</th>
+            <th data-sort="optEdge" class="num" title="Expected net edge (APR) at the optimal concentrated width. Click to rank pools by it.">Opt. edge</th>
             <th data-sort="verdict">Verdict</th>
           </tr>
         </thead>
@@ -153,6 +169,6 @@
     <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Fee-implied σ = √(8·feeAPR).</span>
   </footer>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>

@@ -38,6 +38,20 @@ type Input struct {
 	PeriodsPerYear float64   // sampling frequency of Closes (e.g. 8760 for hourly)
 	ImpliedVol     float64   // options-implied annualised vol, if known
 	HasImplied     bool      // whether ImpliedVol is populated
+
+	// Bars holds the full OHLCV history (oldest first), long enough to cover the
+	// longest volatility window (14 days). When present, Analyze computes the
+	// selectable per-method volatilities (Phase 1), range bands (Phase 2) and the
+	// concentrated-LVR optimum (Phase 3) into Result.Methods. It is derived from
+	// the same single OHLCV request that produces Closes.
+	Bars []OHLCV
+
+	// HorizonDays is the rebalance/scan horizon T used for the range bands and the
+	// concentrated-LVR optimiser. Zero falls back to DefaultHorizonDays.
+	HorizonDays float64
+	// RebalanceCost is the per-rebalance cost (gas + slippage) as a fraction of
+	// position value. Zero falls back to DefaultRebalanceCost.
+	RebalanceCost float64
 }
 
 // Verdict classifies how a pool's fee yield compares to its volatility cost.
@@ -64,6 +78,14 @@ type Result struct {
 	FeeYieldRatio   float64 `json:"feeYieldRatio"`   // FeeAPR / LVRCostRealized
 	Verdict         Verdict `json:"verdict"`         // human-readable classification
 	Score           float64 `json:"score"`           // ranking score, higher is better
+
+	// Methods holds the selectable per-volatility-method analyses (Phase 1-3),
+	// keyed by VolMethod string ("close7d", "close14d", "gk"). It is populated
+	// only when Input.Bars is supplied; the top-level fields above are unchanged
+	// and remain the default 7-day close-to-close view for backward compatibility.
+	Methods map[string]MethodResult `json:"methods,omitempty"`
+	// DefaultMethod names the method the top-level fields correspond to.
+	DefaultMethod string `json:"defaultMethod,omitempty"`
 }
 
 // thresholds for the verdict bands, expressed as a fee-yield ratio (fees vs.
@@ -93,6 +115,11 @@ func Analyze(in Input) Result {
 
 	res.Verdict = classify(res)
 	res.Score = score(res)
+
+	res.DefaultMethod = string(DefaultMethod)
+	if len(in.Bars) > 0 {
+		res.Methods = buildMethods(in, res.FeeAPR)
+	}
 	return res
 }
 
@@ -170,20 +197,26 @@ func RealizedVolatility(closes []float64, periodsPerYear float64) float64 {
 // classify assigns a verdict from the fee-yield ratio, falling back to net edge
 // when realised volatility (and therefore the ratio) is unavailable.
 func classify(r Result) Verdict {
-	if r.FeeAPR == 0 {
+	return classifyRatio(r.FeeAPR, r.FeeYieldRatio, r.RealizedVol)
+}
+
+// classifyRatio is the verdict logic factored out so the per-method analyses
+// (which carry their own realised vol and ratio) reuse the exact same bands.
+func classifyRatio(feeAPR, feeYieldRatio, realizedVol float64) Verdict {
+	if feeAPR == 0 {
 		return VerdictUnknown
 	}
-	if r.RealizedVol == 0 {
+	if realizedVol == 0 {
 		// No volatility signal: judge on whether any fees accrue at all.
-		if r.FeeAPR > 0 {
+		if feeAPR > 0 {
 			return VerdictFair
 		}
 		return VerdictUnknown
 	}
 	switch {
-	case r.FeeYieldRatio >= ratioAttractive:
+	case feeYieldRatio >= ratioAttractive:
 		return VerdictAttractive
-	case r.FeeYieldRatio >= ratioFair:
+	case feeYieldRatio >= ratioFair:
 		return VerdictFair
 	default:
 		return VerdictUnattractive

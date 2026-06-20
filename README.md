@@ -59,6 +59,95 @@ The headline signal is the **fee/vol ratio** `feeAPR ÷ (σ_realized²/8)`:
 The math lives in [`internal/analyzer`](internal/analyzer/analyzer.go) and is
 covered by unit tests.
 
+## Selectable volatility methods, ideal ranges & concentrated-LVR scan
+
+All of the following derive from a **single OHLCV request per pool** (14 days of
+hourly bars, fetched once); the shorter windows and the range estimator are
+sliced/computed from that one dataset, never an extra API call. A counting test
+([`geckoterminal_test.go`](internal/datasource/geckoterminal_test.go)) enforces
+this budget.
+
+### Realized-volatility methods (Phase 1) — `internal/analyzer/volatility.go`
+
+Switchable from the dashboard (`σ method`), recomputing every downstream metric
+from the chosen sigma:
+
+| Method | Window | Estimator |
+|---|---|---|
+| `close7d` *(default, unchanged)* | 7 days | close-to-close log-return stdev × √(periods/yr) |
+| `close14d` | 14 days | same, longer window |
+| `gk` | 14 days | **Garman-Klass** range estimator |
+
+Garman-Klass (Garman & Klass, 1980) reuses the open/high/low/close already in
+each bar, `v = ½(ln H/L)² − (2ln2−1)(ln C/O)²`, annualised as `√(periods · mean v)`.
+It recovers the same sigma with **~5× lower sample variance** than close-to-close
+(verified in `volatility_test.go`) at zero extra data cost. Illiquid pools (gaps,
+zero-volume bars) return a clear *not enough data* signal rather than a garbage
+number. (The pipeline takes a plain `[]OHLCV` + periods/yr, so the planned
+pool-ratio-price correction slots in by feeding a different slice — no new call.)
+
+### Ideal range bands (Phase 2) — `internal/analyzer/ranges.go`
+
+Under GBM the log-price over `T` days is Normal with stdev `s = σ·√(T/365)`
+(volatility grows with √time). The lognormal containment band is, for `z` ∈ {1,2}:
+
+```
+up   = exp(+z·s) − 1        down = 1 − exp(−z·s)
+```
+
+≈68% (`z=1`) and ≈95% (`z=2`) containment; the up move is slightly larger in
+magnitude than the down move because price is `exp(log-price)`. **These bands are
+a containment target, not a profit-optimal width** (that's Phase 3). The horizon
+`T` is selectable (default 1 day). The tracked position also shows its **actual**
+range as notional prices, computed from `tickLower/tickUpper` + decimals via
+`internal/v3math` (`price = 1.0001^tick · 10^(dec0−dec1)`) — display-only, zero
+network/chain calls; within-range reads 0% at the lower tick, 100% at the upper.
+
+### Concentrated-LVR optimal width (Phase 3) — `internal/analyzer/concentrated.go`
+
+Evaluates each pool as a concentrated position at an optimal width. With a log
+half-width `δ` (range `[p·e^−δ, p·e^+δ]`):
+
+- **Concentration factor** `C(δ) = 1 / (1 − e^(−δ/2))` — capital efficiency vs
+  full range. Wider ⇒ smaller `C`; full-range limit ⇒ `C → 1`.
+- **Same-width invariant** (the trap to avoid): while in range, fee yield *and*
+  LVR are both amplified by the **same** `C`, so they must be compared at one
+  width — never concentrated cost vs full-range fees.
+- **Time in range / rebalancing**: in log-price the centred price is a driftless
+  BM; expected time to hit an edge of `±δ` is `δ²/σ²` (years), so the position
+  re-centres `σ²/δ²` times per year.
+- **Per-rebalance costs**: a configurable gas+slippage `rebalanceCost` plus the
+  realised divergence loss at the edge `boundaryLoss(δ) = s(s−1)/(s²+1)`, `s=e^(δ/2)`.
+
+Expected net edge (annualised) as a function of width:
+
+```
+NetEdge(δ) = (feeAPR − σ²/8)·C(δ) − (σ²/δ²)·(rebalanceCost + boundaryLoss(δ))
+```
+
+The first term pulls tighter (more amplification), the rebalancing term pulls
+wider; their balance gives a single interior optimum, found by a grid +
+golden-section search. Reported per pool: the optimal half-width (the "ideal
+range" figure) and the net edge at it; the table can re-rank by this. Direction
+invariants (higher σ ⇒ wider, higher fee ⇒ narrower, higher rebalance cost ⇒
+wider) are unit-tested.
+
+**Assumptions / parameters** (configurable, with defaults): horizon `T`
+(`DefaultHorizonDays` = 1 day), `rebalanceCost` (`DefaultRebalanceCost` = 5 bps),
+GBM with zero drift in log-price. The fee APR is taken as the pool's current
+yield independent of position size, so very-high-fee/low-vol pools can show a very
+tight optimum and a large idealised net edge — an upper bound, documented in
+[`concentrated.go`](internal/analyzer/concentrated.go).
+
+### Offline reconciliation
+
+A captured-shape GeckoTerminal fixture
+([`testdata/`](internal/datasource/testdata)) is fed from disk and reconciled
+against a hand calculation (feeAPR exact) and the generating sigma
+([`reconcile_test.go`](internal/datasource/reconcile_test.go)). An offline
+integration smoke test ([`api_test.go`](internal/api/api_test.go)) asserts the
+new API fields are present, finite and within plausible bounds.
+
 ## Tracked position & delta hedge
 
 A concentrated-liquidity position is net **long** its volatile leg (e.g. the

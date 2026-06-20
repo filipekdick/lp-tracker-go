@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+
+	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 )
 
 // Demo is a self-contained Source that synthesises realistic-looking pools and
@@ -102,8 +104,9 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 	turnover := (0.02 + d.rng.Float64()*0.6) * (0.003 / fee)
 	volume := tvl * turnover
 
-	closes := geometricBrownian(d.rng, base.price, vol, 168) // 7 days hourly
-	price := closes[len(closes)-1]
+	ohlc := geometricBrownianOHLC(d.rng, base.price, vol, 14*24) // 14 days hourly
+	closes := closesTail(ohlc, 7*24)                             // 7-day close tail
+	price := ohlc[len(ohlc)-1].Close
 
 	return RawPool{
 		Chain:          chain.Display,
@@ -120,6 +123,7 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 		Volume24hUSD:   volume,
 		PriceUSD:       price,
 		Closes:         closes,
+		OHLC:           ohlc,
 		PeriodsPerYear: 24 * 365,
 	}
 }
@@ -142,21 +146,49 @@ func (d *Demo) fakeAddress(slug string) string {
 	return sb.String()
 }
 
-// geometricBrownian returns n hourly close prices for a GBM with the given
-// annualised volatility (and zero drift), starting from p0.
-func geometricBrownian(rng *rand.Rand, p0, annualVol float64, n int) []float64 {
+// geometricBrownianOHLC returns n hourly OHLCV bars for a GBM with the given
+// annualised volatility (and zero drift), starting from p0. Each bar's high/low
+// are drawn from the exact Brownian-bridge extreme distributions pinned at the
+// bar's open and close, so the range-based (Garman-Klass) estimator is unbiased.
+func geometricBrownianOHLC(rng *rand.Rand, p0, annualVol float64, n int) []analyzer.OHLCV {
 	const hoursPerYear = 24 * 365
-	dt := 1.0 / hoursPerYear
-	sigmaStep := annualVol * math.Sqrt(dt)
+	w := annualVol * annualVol / hoursPerYear // log-price variance over one bar
+	sd := math.Sqrt(w)
 
-	closes := make([]float64, 0, n)
-	p := p0
+	bars := make([]analyzer.OHLCV, 0, n)
+	x := math.Log(p0)
 	for i := 0; i < n; i++ {
-		shock := rng.NormFloat64() * sigmaStep
-		p *= math.Exp(-0.5*sigmaStep*sigmaStep + shock)
-		closes = append(closes, p)
+		a := x
+		b := x + (-0.5*w + rng.NormFloat64()*sd)
+		// Brownian-bridge extremes: P(High>h)=exp(-2(h-a)(h-b)/w); invert with U.
+		qh := -(w / 2) * math.Log(rng.Float64())
+		high := 0.5 * ((a + b) + math.Sqrt((a-b)*(a-b)+4*qh))
+		ql := -(w / 2) * math.Log(rng.Float64())
+		low := 0.5 * ((a + b) - math.Sqrt((a-b)*(a-b)+4*ql))
+		bars = append(bars, analyzer.OHLCV{
+			Time:   int64(i),
+			Open:   math.Exp(a),
+			High:   math.Exp(high),
+			Low:    math.Exp(low),
+			Close:  math.Exp(b),
+			Volume: 1_000 + rng.Float64()*1_000_000,
+		})
+		x = b
 	}
-	return closes
+	return bars
+}
+
+// closesTail returns the last n close prices from a bar slice (or all of them if
+// fewer), oldest first.
+func closesTail(bars []analyzer.OHLCV, n int) []float64 {
+	if n > len(bars) {
+		n = len(bars)
+	}
+	out := make([]float64, 0, n)
+	for _, b := range bars[len(bars)-n:] {
+		out = append(out, b.Close)
+	}
+	return out
 }
 
 // DemoImpliedVol is an offline ImpliedVolSource for BTC/ETH-like assets.
