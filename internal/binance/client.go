@@ -2,12 +2,15 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/adshao/go-binance/v2/futures"
+	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 )
 
 // Client wraps the Binance futures client so the rest of our
@@ -19,12 +22,22 @@ type Client struct {
 // Position is one open futures position in our simple form.
 // Position is one open futures position in our own simple form.
 type Position struct {
-	Symbol           string
-	Size             float64 // negative = short, positive = long
-	EntryPrice       float64
-	MarkPrice        float64
-	UnrealizedPnL    float64
-	LiquidationPrice float64
+	Symbol           string  `json:"symbol"`
+	Size             float64 `json:"size"` // negative = short, positive = long
+	EntryPrice       float64 `json:"entryPrice"`
+	MarkPrice        float64 `json:"markPrice"`
+	UnrealizedPnL    float64 `json:"unrealizedPnl"`
+	LiquidationPrice float64 `json:"liquidationPrice"`
+}
+
+// LimitOrder represents an active limit order.
+type LimitOrder struct {
+	Symbol      string  `json:"symbol"`
+	OrderID     int64   `json:"orderId"`
+	Side        string  `json:"side"`
+	Price       float64 `json:"price"`
+	OrigQty     float64 `json:"origQty"`
+	ExecutedQty float64 `json:"executedQty"`
 }
 
 // Side tells Binance whether we are buying or selling.
@@ -33,6 +46,13 @@ type Side string
 const (
 	SideBuy  Side = "BUY"
 	SideSell Side = "SELL"
+)
+
+// ErrSymbolNotFound means the venue (for example the testnet) does not
+// list the requested trading symbol.
+var (
+	ErrNoPositions    = errors.New("no positions found")
+	ErrSymbolNotFound = errors.New("symbol not listed on this venue")
 )
 
 // Connect creates a Binance futures client pointed at the testnet.
@@ -49,6 +69,17 @@ func (c *Client) Ping(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("Could not reach Binance: %w", err)
 	}
 	return serverTime, nil
+}
+
+// SyncTime aligns our clock with Binance's server time. Signed requests
+// rejected with error -1021 if our timestamp drifts too far from theirs,
+// happens on clould machines. Call this once after Connect.
+func (c *Client) SyncTime(ctx context.Context) error {
+	_, err := c.futures.NewServerTimeService().Do(ctx)
+	if err != nil {
+		return fmt.Errorf("syncing time with bincance: %w", err)
+	}
+	return nil
 }
 
 // parseFloatOrZero parses a Binance numeric string, returning 0 if it can't.
@@ -72,7 +103,7 @@ func (c *Client) GetQuantityPrecision(ctx context.Context, symbol string) (int, 
 			return s.QuantityPrecision, nil
 		}
 	}
-	return 0, fmt.Errorf("symbol %s not found in exchange info", symbol)
+	return 0, fmt.Errorf("symbol %s not found in exchange info: %w", symbol, ErrSymbolNotFound)
 }
 
 // GetBalances reads all asset balances in the futures acccount.
@@ -189,6 +220,8 @@ func (c *Client) PlaceMarketOrder(
 	if err != nil {
 		return nil, fmt.Errorf("placing order failed: %w", err)
 	}
+	log.Printf("[LIVE]Placed MARKE %s: %s %s (reduceOnly=%t) -> orderID %d, filled %s @avg %s, status %s",
+		side, quantity, symbol, reduceOnly, order.OrderID, order.CumQty, order.AvgPrice, order.Status)
 	return order, nil
 }
 
@@ -197,7 +230,7 @@ func (c *Client) PlaceMarketOrder(
 // It only trades when the gap is at least 'minChange', to avoid churn on noise.
 func (c *Client) SyncShort(
 	ctx context.Context, symbol string, targetShort,
-	minChange float64, dryRun bool) error {
+	minChange float64, dryRun bool, strategy *hedger.Strategy) error {
 	if targetShort < 0 {
 		return fmt.Errorf("targetShort must be zero or positive, got %v", targetShort)
 	}
@@ -227,7 +260,262 @@ func (c *Client) SyncShort(
 		return err
 	}
 
+	// 1. Calculate drift percentage
+	driftPct := 0.0
+	if targetShort > 0 {
+		driftPct = delta / targetShort
+	}
+
+	// 2. Determine Action
+	var action hedger.Action
+	var reason string
+	if strategy != nil {
+		action, reason = strategy.Decide(driftPct)
+	} else {
+		action, reason = hedger.ActionMarket, "no strategy provided"
+	}
+
 	quantity := strconv.FormatFloat(math.Abs(delta), 'f', precision, 64)
-	_, err = c.PlaceMarketOrder(ctx, symbol, side, quantity, reduceOnly, dryRun)
+
+	// Fetch Min Notional and Mark Price
+	minNotional, _ := c.GetMinNotional(ctx, symbol)
+	openPositions, _ := c.GetOpenPositions(ctx)
+	var markPrice float64
+	for _, p := range openPositions {
+		if p.Symbol == symbol {
+			markPrice = p.MarkPrice
+			break
+		}
+	}
+	if markPrice == 0 {
+		// fallback to market price
+		prices, err := c.futures.NewListPricesService().Symbol(symbol).Do(ctx)
+		if err == nil && len(prices) > 0 {
+			markPrice = parseFloatOrZero(prices[0].Price)
+		}
+	}
+
+	qtyFloat, _ := strconv.ParseFloat(quantity, 64)
+	if qtyFloat == 0 || (markPrice > 0 && minNotional > 0 && qtyFloat*markPrice < minNotional) {
+		log.Printf("%s: gap %.4f below min notional %.2f, skipping", symbol, qtyFloat, minNotional)
+		return nil
+	}
+
+	switch action {
+	case hedger.ActionNone:
+		log.Printf("%s: %s (short %.2f, target %.2f)", symbol, reason, -current, targetShort)
+		return nil
+
+	case hedger.ActionLimit:
+		// Check existing open limit orders
+		openOrders, err := c.GetOpenOrders(ctx, symbol)
+		if err == nil && len(openOrders) > 0 {
+			// for simplicity, cancel existing to replace
+			c.CancelAllOrders(ctx, symbol)
+		}
+		// Price the order at the symbol's tick size, offset to the maker side so
+		// the post-only order isn't rejected (-1111 precision / -5022 crossing).
+		tick, pricePrecision, perr := c.GetPriceFilter(ctx, symbol)
+		if perr != nil {
+			return perr
+		}
+		priceStr := makerLimitPrice(markPrice, tick, pricePrecision, side)
+		log.Printf("%s: placing LIMIT %s order @ %s (%s), driftPct: %.4f", symbol, side, priceStr, reason, driftPct)
+		_, err = c.PlaceLimitOrder(ctx, symbol, side, quantity, priceStr, reduceOnly, dryRun)
+		if err != nil && strings.Contains(err.Error(), "-4131") {
+			log.Printf("%s: limit price outside PERCENT_PRICE band, skipping this cycle", symbol)
+			return nil
+		}
+		return err
+
+	case hedger.ActionMarket:
+		// Cancel existing limit orders to avoid over-hedging
+		c.CancelAllOrders(ctx, symbol)
+		log.Printf("%s: placing MARKET order (%s), driftPct: %.4f", symbol, reason, driftPct)
+		_, err = c.PlaceMarketOrder(ctx, symbol, side, quantity, reduceOnly, dryRun)
+		return err
+	}
+
+	return nil
+}
+
+// GetOpenOrders lists active limit orders for the symbol.
+func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]*futures.Order, error) {
+	return c.futures.NewListOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// GetAllOpenOrders lists all active limit orders across all symbols.
+func (c *Client) GetAllOpenOrders(ctx context.Context) ([]LimitOrder, error) {
+	orders, err := c.futures.NewListOpenOrdersService().Do(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var res []LimitOrder
+	for _, o := range orders {
+		price, _ := strconv.ParseFloat(o.Price, 64)
+		orig, _ := strconv.ParseFloat(o.OrigQuantity, 64)
+		exec, _ := strconv.ParseFloat(o.ExecutedQuantity, 64)
+		res = append(res, LimitOrder{
+			Symbol:      o.Symbol,
+			OrderID:     o.OrderID,
+			Side:        string(o.Side),
+			Price:       price,
+			OrigQty:     orig,
+			ExecutedQty: exec,
+		})
+	}
+	return res, nil
+}
+
+// CancelOrder cancels a specific order.
+func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	_, err := c.futures.NewCancelOrderService().Symbol(symbol).OrderID(orderID).Do(ctx)
 	return err
+}
+
+// CancelAllOrders cancels all active orders for the symbol.
+func (c *Client) CancelAllOrders(ctx context.Context, symbol string) error {
+	return c.futures.NewCancelAllOpenOrdersService().Symbol(symbol).Do(ctx)
+}
+
+// GetMarkPrice returns the current futures mark price for a symbol
+// (e.g. "ETHUSDT"). Returns ErrSymbolNotFound if the symbol is not listed.
+func (c *Client) GetMarkPrice(ctx context.Context, symbol string) (float64, error) {
+	res, err := c.futures.NewPremiumIndexService().Symbol(symbol).Do(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid symbol") {
+			return 0, fmt.Errorf("%w: %s", ErrSymbolNotFound, symbol)
+		}
+		return 0, fmt.Errorf("fetching mark price for %s: %w", symbol, err)
+	}
+	if len(res) == 0 {
+		return 0, fmt.Errorf("%w: %s", ErrSymbolNotFound, symbol)
+	}
+	price, err := strconv.ParseFloat(res[0].MarkPrice, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing mark price for %s: %w", symbol, err)
+	}
+	return price, nil
+}
+
+// GetMinNotional fetches the MIN_NOTIONAL filter for the symbol.
+func (c *Client) GetMinNotional(ctx context.Context, symbol string) (float64, error) {
+	info, err := c.futures.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("could not read exchange info: %w", err)
+	}
+	for _, s := range info.Symbols {
+		if s.Symbol == symbol {
+			for _, f := range s.Filters {
+				if f["filterType"] == "MIN_NOTIONAL" {
+					if val, ok := f["notional"].(string); ok {
+						return strconv.ParseFloat(val, 64)
+					}
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("MIN_NOTIONAL not found for %s", symbol)
+}
+
+// GetPriceFilter returns the symbol's PRICE_FILTER tick size and the number of
+// decimal places allowed for prices. Limit prices must be a multiple of the
+// tick and within the precision, or Binance rejects the order with -1111.
+func (c *Client) GetPriceFilter(ctx context.Context, symbol string) (tickSize float64, pricePrecision int, err error) {
+	info, err := c.futures.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("could not read exchange info: %w", err)
+	}
+	for _, s := range info.Symbols {
+		if s.Symbol != symbol {
+			continue
+		}
+		pricePrecision = s.PricePrecision
+		for _, f := range s.Filters {
+			if f["filterType"] == "PRICE_FILTER" {
+				if v, ok := f["tickSize"].(string); ok {
+					tickSize, _ = strconv.ParseFloat(v, 64)
+				}
+			}
+		}
+		return tickSize, pricePrecision, nil
+	}
+	return 0, 0, fmt.Errorf("symbol %s not found in exchange info: %w", symbol, ErrSymbolNotFound)
+}
+
+// makerLimitPrice returns a tick-aligned limit price that rests on the book as
+// a maker (post-only) order: below the mark for a buy, above it for a sell. The
+// small offset keeps the order from crossing the spread — which is what gets a
+// post-only (GTX) order rejected with -5022 — while staying close enough to
+// fill on the next move. The result is rounded to the symbol's price precision.
+func makerLimitPrice(mark, tick float64, pricePrecision int, side Side) string {
+	if mark <= 0 {
+		return strconv.FormatFloat(mark, 'f', pricePrecision, 64)
+	}
+	const edge = 0.0005 // ~5 bps inside-the-book offset
+	var p float64
+	if side == SideSell {
+		p = roundToTick(mark*(1+edge), tick, true)
+		if tick > 0 && p < mark+tick {
+			p = roundToTick(mark+tick, tick, true)
+		}
+	} else {
+		p = roundToTick(mark*(1-edge), tick, false)
+		if tick > 0 && p > mark-tick {
+			p = roundToTick(mark-tick, tick, false)
+		}
+	}
+	return strconv.FormatFloat(p, 'f', pricePrecision, 64)
+}
+
+// roundToTick snaps a price to the tick grid, rounding up or down as requested.
+func roundToTick(price, tick float64, up bool) float64 {
+	if tick <= 0 {
+		return price
+	}
+	if up {
+		return math.Ceil(price/tick) * tick
+	}
+	return math.Floor(price/tick) * tick
+}
+
+// PlaceLimitOrder places a post-only limit order.
+func (c *Client) PlaceLimitOrder(
+	ctx context.Context,
+	symbol string,
+	side Side,
+	quantity string,
+	price string,
+	reduceOnly bool,
+	dryRun bool) (*futures.CreateOrderResponse, error) {
+
+	if dryRun {
+		log.Printf("[DRY RUN] would place LIMIT %s: %s %s @ %s (reduceOnly=%t)", side, quantity, symbol, price, reduceOnly)
+		return nil, nil
+	}
+
+	var binanceSide futures.SideType
+	switch side {
+	case SideBuy:
+		binanceSide = futures.SideTypeBuy
+	case SideSell:
+		binanceSide = futures.SideTypeSell
+	}
+
+	order, err := c.futures.NewCreateOrderService().
+		Symbol(symbol).
+		Side(binanceSide).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTX). // Post Only
+		Quantity(quantity).
+		Price(price).
+		ReduceOnly(reduceOnly).
+		NewOrderResponseType(futures.NewOrderRespTypeRESULT).
+		Do(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[LIVE] Placed LIMIT %s: %s %s @ %s -> orderID %d, status %s", side, quantity, symbol, price, order.OrderID, order.Status)
+	return order, nil
 }

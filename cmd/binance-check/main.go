@@ -54,7 +54,7 @@ func main() {
 	// 	log.Fatalf("reading positions failed: %v", err)
 	// }
 
-	err = client.SyncShort(context.Background(), "ETHUSDT", 0.1, 0.001, true)
+	err = client.SyncShort(context.Background(), "ETHUSDT", 0.1, 0.001, true, nil)
 	if err != nil {
 		log.Fatalf("sync failed: %v", err)
 	}

@@ -36,7 +36,11 @@ func main() {
 	client := connect()
 	defer client.Close()
 
-	reader := lp.NewReader(client, nfpmAddress, factoryAddress)
+	nfpmAddrEnv := os.Getenv("NFPM_ADDRESS")
+	if nfpmAddrEnv == "" {
+		nfpmAddrEnv = nfpmAddress
+	}
+	reader := lp.NewReader(client, nfpmAddrEnv, factoryAddress)
 	report, err := reader.ReadPosition(tokenID)
 	if err != nil {
 		log.Fatalf("failed to read position: %v", err)

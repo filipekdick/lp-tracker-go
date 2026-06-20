@@ -44,7 +44,12 @@ func main() {
 	}
 	defer client.Close()
 
-	nfpm, err := aerodrome.NewNFPM(common.HexToAddress(nfpmAddress), client)
+	nfpmAddrEnv := os.Getenv("NFPM_ADDRESS")
+	if nfpmAddrEnv == "" {
+		nfpmAddrEnv = nfpmAddress
+	}
+
+	nfpm, err := aerodrome.NewNFPM(common.HexToAddress(nfpmAddrEnv), client)
 	if err != nil {
 		log.Fatalf("failed to bind NFPM: %v", err)
 	}
