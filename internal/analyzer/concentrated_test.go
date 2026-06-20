@@ -73,77 +73,96 @@ func TestSameWidthInvariant(t *testing.T) {
 	}
 }
 
-// baseConc is a regime with a clean interior optimum (feeAPR > sigma^2/4 keeps
-// the optimum off the boundaries).
-func baseConc() ConcentratedInput {
-	return ConcentratedInput{FeeAPR: 0.50, Sigma: 0.60, RebalanceCost: 0.05, HorizonDays: 1}
-}
-
-// TestDirectionInvariants checks the comparative statics: higher volatility =>
-// wider optimum, higher fee => narrower optimum, higher rebalancing cost =>
-// wider optimum.
-func TestDirectionInvariants(t *testing.T) {
-	base := OptimalConcentratedRange(baseConc())
-
-	hiVol := baseConc()
-	hiVol.Sigma = 0.90
-	if !(OptimalConcentratedRange(hiVol).Delta > base.Delta) {
-		t.Fatalf("higher vol should widen optimum: hi=%.5f base=%.5f", OptimalConcentratedRange(hiVol).Delta, base.Delta)
+// TestContainment pins the time-in-range proxy p at k=1 and k=2.
+func TestContainment(t *testing.T) {
+	if p := Containment(1); math.Abs(p-0.6826894921) > 1e-9 {
+		t.Fatalf("p(k=1) = %.10f, want ≈0.6827", p)
 	}
-
-	hiFee := baseConc()
-	hiFee.FeeAPR = 0.90
-	if !(OptimalConcentratedRange(hiFee).Delta < base.Delta) {
-		t.Fatalf("higher fee should narrow optimum: hi=%.5f base=%.5f", OptimalConcentratedRange(hiFee).Delta, base.Delta)
-	}
-
-	hiCost := baseConc()
-	hiCost.RebalanceCost = 0.15
-	if !(OptimalConcentratedRange(hiCost).Delta > base.Delta) {
-		t.Fatalf("higher rebalancing cost should widen optimum: hi=%.5f base=%.5f", OptimalConcentratedRange(hiCost).Delta, base.Delta)
+	if p := Containment(2); math.Abs(p-0.9544997361) > 1e-9 {
+		t.Fatalf("p(k=2) = %.10f, want ≈0.9545", p)
 	}
 }
 
-// TestOptimizerFindsMaximum checks the optimiser lands on the true argmax of the
-// net-edge curve. Reference: a brute-force scan at 1e-5 resolution in delta.
-// Tolerance: 2e-3 absolute on delta — comfortably above the reference grid step
-// yet tight relative to the optimum (~0.05), and the curve is smooth and
-// single-peaked in this regime.
-func TestOptimizerFindsMaximum(t *testing.T) {
-	in := baseConc()
-	got := OptimalConcentratedRange(in)
+// TestExpectedBandEdgeWeighting checks the central correction: the expected fee
+// term equals C(delta)*feeAPR*p, and switching k changes both delta and p.
+func TestExpectedBandEdgeWeighting(t *testing.T) {
+	in := BandEdgeInput{FeeAPR: 0.30, Sigma: 0.60, K: 1, HorizonDays: 1, RebalanceCost: 0.0005}
+	r1 := ExpectedBandEdge(in)
 
-	// Brute-force reference argmax.
-	bestD, bestV := minDelta, math.Inf(-1)
-	for d := minDelta; d <= maxDelta; d += 1e-5 {
-		if v := NetEdgeAtWidth(in, d); v > bestV {
-			bestV, bestD = v, d
-		}
+	// Fee term must equal C(delta)*feeAPR*p exactly.
+	wantFee := ConcentrationFactor(r1.Delta) * in.FeeAPR * Containment(1)
+	if math.Abs(r1.ExpectedFeeAPR-wantFee) > 1e-12 {
+		t.Fatalf("expected fee = %.12f, want C*feeAPR*p = %.12f", r1.ExpectedFeeAPR, wantFee)
 	}
-	if got.Delta <= minDelta+1e-6 || got.Delta >= maxDelta-1e-6 {
-		t.Fatalf("expected interior optimum, got delta=%.6f (boundary)", got.Delta)
+	// LVR term weighted the same way.
+	wantLVR := ConcentrationFactor(r1.Delta) * LVRCost(in.Sigma) * Containment(1)
+	if math.Abs(r1.ExpectedLVRAPR-wantLVR) > 1e-12 {
+		t.Fatalf("expected lvr = %.12f, want C*(σ²/8)*p = %.12f", r1.ExpectedLVRAPR, wantLVR)
 	}
-	if math.Abs(got.Delta-bestD) > 2e-3 {
-		t.Fatalf("optimiser delta=%.6f, reference=%.6f (diff %.2e)", got.Delta, bestD, math.Abs(got.Delta-bestD))
+	// Net edge is fee - lvr - exit.
+	if math.Abs(r1.NetEdgeAPR-(r1.ExpectedFeeAPR-r1.ExpectedLVRAPR-r1.ExitCostAPR)) > 1e-12 {
+		t.Fatal("net edge != fee - lvr - exit")
 	}
-	// The reported net edge must be the value at the reported delta.
-	if math.Abs(got.NetEdgeAPR-NetEdgeAtWidth(in, got.Delta)) > 1e-12 {
-		t.Fatal("reported net edge inconsistent with delta")
+
+	in.K = 2
+	r2 := ExpectedBandEdge(in)
+	// delta doubles with k, p rises to ~0.95.
+	if math.Abs(r2.Delta-2*r1.Delta) > 1e-12 {
+		t.Fatalf("delta(k=2)=%.6f, want 2*delta(k=1)=%.6f", r2.Delta, 2*r1.Delta)
+	}
+	if !(r2.Containment > r1.Containment) {
+		t.Fatalf("p(k=2)=%.4f should exceed p(k=1)=%.4f", r2.Containment, r1.Containment)
 	}
 }
 
-// TestFullRangeReference checks the full-range net edge and the C->1 limit, so
-// the legacy full-range view remains available and consistent.
-func TestFullRangeReference(t *testing.T) {
-	in := baseConc()
-	r := OptimalConcentratedRange(in)
-	wantFull := in.FeeAPR - LVRCost(in.Sigma)
-	if math.Abs(r.FullRangeNetEdge-wantFull) > 1e-12 {
-		t.Fatalf("full-range net edge = %v, want %v", r.FullRangeNetEdge, wantFull)
+// TestExpectedBandEdgeBounded checks the estimate is finite/bounded with no
+// corner-solution blowup, and that a negative-edge pool yields a sane negative.
+//
+// Unlike the removed optimiser — whose edge grew without limit as the grid floor
+// shrank (a clamp artifact) — this estimate is a single evaluation at the
+// principled ±kσ band, so it is finite and depends on no arbitrary clamp. For a
+// genuinely low-vol pool the idealised number is still large (the band is tight,
+// C is high, and feeAPR is taken independent of position size), but it is finite
+// and clamp-independent. The decisive anti-corner property is that raising
+// volatility — where the old model still pinned to the floor and blew up — now
+// widens the band, drives C→1, and keeps the edge near the full-range value.
+func TestExpectedBandEdgeBounded(t *testing.T) {
+	// Stablecoin-ish: low vol, healthy fees. Finite and positive.
+	stable := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.20, Sigma: 0.05, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
+	if math.IsNaN(stable.NetEdgeAPR) || math.IsInf(stable.NetEdgeAPR, 0) {
+		t.Fatalf("stable net edge not finite: %v", stable.NetEdgeAPR)
 	}
-	// Optimising can only do at least as well as full range.
-	if r.NetEdgeAPR < r.FullRangeNetEdge-1e-9 {
-		t.Fatalf("optimum %.6f worse than full range %.6f", r.NetEdgeAPR, r.FullRangeNetEdge)
+	if stable.NetEdgeAPR <= 0 {
+		t.Fatalf("high-fee low-vol pool should have positive edge, got %v", stable.NetEdgeAPR)
+	}
+
+	// Anti-corner: a HIGH-vol, high-fee pool (where the optimiser used to pin the
+	// width at the floor and report an absurd edge in the hundreds) now yields a
+	// modest, finite number — the frequent-exit cost from the ±kσ band offsets the
+	// amplified fees instead of being ignored.
+	hiVol := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.20, Sigma: 1.0, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
+	if math.IsNaN(hiVol.NetEdgeAPR) || math.IsInf(hiVol.NetEdgeAPR, 0) {
+		t.Fatalf("high-vol edge not finite: %v", hiVol.NetEdgeAPR)
+	}
+	if math.Abs(hiVol.NetEdgeAPR) > 50 {
+		t.Fatalf("high-vol high-fee edge %.4f looks like a corner blowup", hiVol.NetEdgeAPR)
+	}
+
+	// High-vol, thin fees: LVR dominates -> negative but sane.
+	bad := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.02, Sigma: 1.2, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
+	if bad.NetEdgeAPR >= 0 {
+		t.Fatalf("thin-fee high-vol pool should have negative edge, got %v", bad.NetEdgeAPR)
+	}
+	if math.IsInf(bad.NetEdgeAPR, 0) || bad.NetEdgeAPR < -100 {
+		t.Fatalf("negative edge not sane/bounded: %v", bad.NetEdgeAPR)
+	}
+}
+
+// TestExpectedBandEdgeFlatSeries guards the degenerate zero-sigma case.
+func TestExpectedBandEdgeFlatSeries(t *testing.T) {
+	r := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.1, Sigma: 0, K: 1, HorizonDays: 1})
+	if math.IsNaN(r.NetEdgeAPR) || math.IsInf(r.NetEdgeAPR, 0) {
+		t.Fatalf("flat-series edge not finite: %v", r.NetEdgeAPR)
 	}
 }
 

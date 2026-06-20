@@ -14,8 +14,14 @@ const state = {
   selected: null, // "chainSlug/address"
   protocolsSeen: new Set(),
   method: "close7d", // selected realized-volatility method
-  horizonDays: 1, // horizon T (days) for the ±σ range bands
+  horizonDays: 1, // horizon T (days) for the ±σ range bands and expected edge
+  k: 1, // band width in sigmas (1 or 2) for the bands and expected edge
 };
+
+// DEFAULT_REBALANCE_COST mirrors analyzer.DefaultRebalanceCost (gas per
+// re-centre, fraction of value), so the client-side expected-edge recompute
+// matches the server when the horizon/band toggles move off the defaults.
+const DEFAULT_REBALANCE_COST = 0.0005;
 
 // view returns the analysis fields for a pool under the currently selected
 // volatility method. The server precomputes every method (one OHLCV call per
@@ -39,8 +45,6 @@ function view(p) {
       netEdgeApr: m.netEdgeApr,
       feeYieldRatio: m.feeYieldRatio,
       verdict: m.verdict,
-      optimalWidthPct: m.optimalWidthPct,
-      optimalNetEdgeApr: m.optimalNetEdgeApr,
       ok: true,
     });
   }
@@ -51,10 +55,42 @@ function view(p) {
     netEdgeApr: a.netEdgeApr,
     feeYieldRatio: a.feeYieldRatio,
     verdict: a.verdict,
-    optimalWidthPct: null,
-    optimalNetEdgeApr: null,
     ok: a.realizedVol > 0,
   });
+}
+
+// containment returns p = erf(k/√2), the time-in-range proxy (≈0.6827 for k=1,
+// ≈0.9545 for k=2). Uses a rational approximation of erf (no Math.erf in JS).
+function containment(k) {
+  return erf(k / Math.SQRT2);
+}
+function erf(x) {
+  // Abramowitz & Stegun 7.1.26, |error| < 1.5e-7 — ample for a display proxy.
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-x * x);
+  return x < 0 ? -y : y;
+}
+
+// expectedEdge mirrors analyzer.ExpectedBandEdge so the column reacts live to the
+// σ-method, horizon-T and ±kσ toggles. See concentrated.go for the derivation:
+//   delta = k·σ·√(T/365);  C = 1/(1−e^{−δ/2});  p = erf(k/√2)
+//   netEdge = C·feeAPR·p − C·(σ²/8)·p − (σ²/δ²)·(gas + boundaryLoss(δ))
+function expectedEdge(feeApr, sigma, k, T) {
+  if (feeApr == null) return null;
+  const p = containment(k);
+  if (!sigma || sigma <= 0) return feeApr * p; // flat series: fee capture, no LVR/exits
+  const delta = k * sigma * Math.sqrt(T / 365);
+  const C = 1 / (1 - Math.exp(-delta / 2));
+  const s = Math.exp(delta / 2);
+  const boundaryLoss = (s * (s - 1)) / (s * s + 1);
+  const exit = ((sigma * sigma) / (delta * delta)) * (DEFAULT_REBALANCE_COST + boundaryLoss);
+  return C * feeApr * p - C * ((sigma * sigma) / 8) * p - exit;
 }
 
 // rangeBands returns the lognormal ±1σ and ±2σ containment bands for a sigma
@@ -203,33 +239,6 @@ function driftCell(h) {
   return `<span class="${cls}">${sign}${fmt.amount(h.drift)} ${h.exposureSymbol} · ${sign}${pct.toFixed(2)}%</span>`;
 }
 
-// rangeCard renders the tracked position's actual range as notional prices,
-// derived on the server from tickLower/tickUpper via internal/v3math (no API
-// calls). within-range reads 0% at the lower tick and 100% at the upper tick.
-function rangeCard(p) {
-  if (!p || p.tickLower == null || p.tickUpper == null) return "";
-  const lo = p.rangeLowerPrice,
-    hi = p.rangeUpperPrice,
-    cur = p.rangeCurrentPrice;
-  let within = p.rangePositionPct;
-  if (within == null && p.tickUpper !== p.tickLower) {
-    within = ((p.tickNow - p.tickLower) / (p.tickUpper - p.tickLower)) * 100;
-  }
-  const clamped = Math.max(0, Math.min(100, within == null ? 0 : within));
-  const rangePill = p.inRange
-    ? '<span class="pill in">in range</span>'
-    : '<span class="pill out">out of range</span>';
-  return `<div class="tcard">
-    <h3>Position range ${rangePill}</h3>
-    ${kv(`Lower price (${p.symbol1}/${p.symbol0})`, lo != null ? fmt.price(lo) : "—")}
-    ${kv("Current price", cur != null ? fmt.price(cur) : "—")}
-    ${kv("Upper price", hi != null ? fmt.price(hi) : "—")}
-    ${kv("Within range", within == null ? "—" : clamped.toFixed(1) + "%")}
-    <div class="bar-track" style="margin-top:8px"><span class="bar-fill realized" style="width:${clamped}%"></span></div>
-    <p class="hint" style="margin-top:8px">Ticks ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}). Prices derived from on-chain ticks — no API calls.</p>
-  </div>`;
-}
-
 function renderPosition() {
   const section = document.getElementById("tracked");
   const p = state.position;
@@ -340,8 +349,22 @@ function renderPosition() {
       <div class="liq-col">${hodlCell}</div>
     </div>`;
   };
+  // Position range, folded into the Liquidity card. Notional prices come from the
+  // on-chain ticks (server-side via v3math, no API calls); within-range reads 0%
+  // at the lower tick and 100% at the upper tick.
+  let within = p.rangePositionPct;
+  if (within == null && p.tickUpper !== p.tickLower) {
+    within = ((p.tickNow - p.tickLower) / (p.tickUpper - p.tickLower)) * 100;
+  }
+  const clampedWithin = Math.max(0, Math.min(100, within == null ? 0 : within));
+  const rangeBlock = `
+    <div class="kv liq-total" style="margin-top:8px"><span class="k">Range (${p.symbol1}/${p.symbol0})</span>
+      <span class="v">${p.rangeLowerPrice != null ? fmt.price(p.rangeLowerPrice) : "—"} … ${p.rangeUpperPrice != null ? fmt.price(p.rangeUpperPrice) : "—"}</span></div>
+    <div class="kv"><span class="k">Current price</span><span class="v">${p.rangeCurrentPrice != null ? fmt.price(p.rangeCurrentPrice) : "—"}</span></div>
+    <div class="kv"><span class="k">Within range</span><span class="v">${within == null ? "—" : clampedWithin.toFixed(1) + "%"}</span></div>
+    <div class="bar-track" style="margin-top:6px"><span class="bar-fill realized" style="width:${clampedWithin}%"></span></div>`;
   const liq = `<div class="tcard">
-    <h3>Liquidity ${rangePill}</h3>
+    <h3>Liquidity Position ${rangePill}</h3>
     <div class="liq-head"><span class="liq-sym">${p.poolName} · ${fmt.pct(p.feeTier)}</span><span>Current</span><span>HODL</span></div>
     ${liqRow(p.symbol0, p.amount0, curV0, p.initialState ? p.initialState.amount0 : null, hodlV0)}
     ${liqRow(p.symbol1, p.amount1, curV1, p.initialState ? p.initialState.amount1 : null, hodlV1)}
@@ -350,20 +373,66 @@ function renderPosition() {
       <span class="k">Live Token Prices</span>
       <span class="v">${p.symbol0} ${fmt.price(p.price0)} &nbsp;&middot;&nbsp; ${p.symbol1} ${fmt.price(p.price1)}</span>
     </div>
+    ${rangeBlock}
     <p class="hint" style="margin-top:8px">Tick ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}) · Pool TVL ${fmt.usd(p.tvlUsd)}</p>
   </div>`;
 
-  // ---- Fees & Rewards: unclaimed (uncollected) fees ------------------------
+  // ---- Fees & Rewards (with the fee-vs-volatility analysis merged in) -------
   const feeRow = (sym, unAmt, unUsd) => `<div class="liq-row">
     <div class="liq-sym">${sym}</div>
     <div class="liq-col"><span class="liq-amt">${fmt.amount(unAmt)}</span><span class="liq-usd">${fmt.usd(unUsd)}</span></div>
   </div>`;
+
+  // Fee-vs-volatility analysis (uses the selected σ method / horizon / band).
+  const av = view(p);
+  const vols = [
+    { label: "Fee-implied σ", val: av.feeImpliedVol, cls: "fees" },
+    { label: "Realized σ", val: av.realizedVol, cls: "realized" },
+  ];
+  if (av.hasImplied)
+    vols.push({ label: "Deribit IV", val: av.impliedVol, cls: "implied" });
+  const maxVol = Math.max(...vols.map((v) => v.val || 0), 0.0001);
+  const verdictCls = av.verdict || "unknown";
+  const pb = rangeBands(av.realizedVol, state.horizonDays);
+  const Tlbl = state.horizonDays < 1 ? state.horizonDays * 24 + "h" : state.horizonDays + "d";
+  const upK = pb ? (state.k === 2 ? pb.up2 : pb.up1) : null;
+  const dnK = pb ? (state.k === 2 ? pb.dn2 : pb.dn1) : null;
+  const bandLine = pb
+    ? kv(
+        `Ideal range ±${state.k}σ / ${Tlbl}`,
+        `<span class="ratio-pos">+${fmt.pct(upK)}</span> / <span class="ratio-neg">-${fmt.pct(dnK)}</span>`,
+      )
+    : "";
+  const eePos = expectedEdge(av.feeApr, av.realizedVol, state.k, state.horizonDays);
+  const eeLine =
+    eePos != null
+      ? kv(
+          `Exp. edge ±${state.k}σ`,
+          `<span class="${eePos >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(eePos)}</span>`,
+        )
+      : "";
+
   const feesRewards = `<div class="tcard fees-card">
-    <h3>Fees &amp; Rewards</h3>
+    <h3>Fees &amp; Rewards <span class="verdict ${verdictCls}">${av.verdict || "—"}</span></h3>
     <div class="liq-head"><span></span><span>Unclaimed</span></div>
     ${feeRow(p.symbol0, unc0, fees0)}
     ${feeRow(p.symbol1, unc1, fees1)}
     <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
+    <div class="kv liq-total" style="margin-top:8px"><span class="k">Fee APR</span><span class="v">${fmt.pct(av.positionFeeApr || av.feeApr)}</span></div>
+    ${kv("Net edge APR", `<span class="${(av.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(av.netEdgeApr)}</span>`)}
+    ${bandLine}
+    ${eeLine}
+    <div class="bars" style="margin-top:10px">
+      ${vols
+        .map(
+          (v) => `<div class="bar-row">
+        <span class="label">${v.label}</span>
+        <span class="bar-track"><span class="bar-fill ${v.cls}" style="width:${Math.max(2, (v.val / maxVol) * 100)}%"></span></span>
+        <span class="val">${fmt.pct(v.val)}</span></div>`,
+        )
+        .join("")}
+    </div>
+    <p class="hint" style="margin-top:8px">±σ bands are a containment target (≈68%/≈95%); Exp. edge weights amplified fees by time in range — an estimate, not a guaranteed return.</p>
   </div>`;
 
   // Hedge card.
@@ -418,53 +487,10 @@ function renderPosition() {
     ${notes ? `<p class="hint" style="margin-top:8px">${anyDryRun ? "🔒 dry-run · " : ""}${notes}</p>` : ""}
   </div>`;
 
-  // Fee-vs-volatility card with comparison bars (uses the selected σ method).
-  const av = view(p);
-  const vols = [
-    { label: "Fee-implied σ", val: av.feeImpliedVol, cls: "fees" },
-    { label: "Realized σ", val: av.realizedVol, cls: "realized" },
-  ];
-  if (av.hasImplied)
-    vols.push({ label: "Deribit IV", val: av.impliedVol, cls: "implied" });
-  const maxVol = Math.max(...vols.map((v) => v.val || 0), 0.0001);
-  const verdictCls = av.verdict || "unknown";
-  const pb = rangeBands(av.realizedVol, state.horizonDays);
-  const Tlbl = state.horizonDays < 1 ? state.horizonDays * 24 + "h" : state.horizonDays + "d";
-  const bandLine = pb
-    ? kv(
-        `Ideal range ±1σ / ${Tlbl}`,
-        `<span class="ratio-pos">+${fmt.pct(pb.up1)}</span> / <span class="ratio-neg">-${fmt.pct(pb.dn1)}</span>`,
-      )
-    : "";
-  const optLine =
-    av.optimalWidthPct != null
-      ? kv(
-          "Profit-optimal width",
-          `±${fmt.pct(av.optimalWidthPct)} · edge ${fmt.pct(av.optimalNetEdgeApr)}`,
-        )
-      : "";
-  const fee = `<div class="tcard">
-    <h3>Fees vs. volatility <span class="verdict ${verdictCls}">${av.verdict || "—"}</span></h3>
-    ${kv("Fee APR", fmt.pct(av.positionFeeApr || av.feeApr))}
-    ${kv("Net edge APR", `<span class="${(av.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(av.netEdgeApr)}</span>`)}
-    ${bandLine}
-    ${optLine}
-    <div class="bars" style="margin-top:10px">
-      ${vols
-        .map(
-          (v) => `<div class="bar-row">
-        <span class="label">${v.label}</span>
-        <span class="bar-track"><span class="bar-fill ${v.cls}" style="width:${Math.max(2, (v.val / maxVol) * 100)}%"></span></span>
-        <span class="val">${fmt.pct(v.val)}</span></div>`,
-        )
-        .join("")}
-    </div>
-    <p class="hint" style="margin-top:8px">±σ bands are a containment target (≈68%/≈95%), not a profit-optimal width.</p>
-  </div>`;
-
   document.getElementById("position-summary").innerHTML = summaryCards;
-  document.getElementById("tracked-grid").innerHTML =
-    liq + feesRewards + hedge + fee + rangeCard(p);
+  // Second row: exactly three cards — Liquidity Position (with range details),
+  // Fees & Rewards (with the fee-vs-volatility analysis), and the Perp hedge.
+  document.getElementById("tracked-grid").innerHTML = liq + feesRewards + hedge;
 
   const shortsSec = document.getElementById("open-shorts-section");
   if (p.openShorts && p.openShorts.length > 0) {
@@ -792,18 +818,18 @@ function sortKey(p) {
       return a.realizedVol;
     case "feeImpliedVol":
       return a.feeImpliedVol;
-    case "band1": {
+    case "band": {
       const b = rangeBands(a.realizedVol, state.horizonDays);
-      return b ? b.up1 : -1;
+      return b ? (state.k === 2 ? b.up2 : b.up1) : -1;
     }
     case "netEdge":
       return a.netEdgeApr;
     case "ratio":
       return a.feeYieldRatio;
-    case "optWidth":
-      return a.optimalWidthPct == null ? -1 : a.optimalWidthPct;
-    case "optEdge":
-      return a.optimalNetEdgeApr == null ? -Infinity : a.optimalNetEdgeApr;
+    case "expEdge": {
+      const e = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
+      return e == null ? -Infinity : e;
+    }
     case "verdict":
       return a.verdict;
     default:
@@ -858,13 +884,14 @@ function renderTable() {
       const ratioCls = a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg";
       const edgeCls = a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg";
       const b = rangeBands(a.realizedVol, state.horizonDays);
+      const up = b ? (state.k === 2 ? b.up2 : b.up1) : null;
+      const dn = b ? (state.k === 2 ? b.dn2 : b.dn1) : null;
       const bandCell = b
-        ? `<span class="ratio-pos">+${fmt.pct(b.up1)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn1)}</span>`
+        ? `<span class="ratio-pos">+${fmt.pct(up)}</span> / <span class="ratio-neg">-${fmt.pct(dn)}</span>`
         : "—";
-      const optWidth =
-        a.optimalWidthPct != null ? "±" + fmt.pct(a.optimalWidthPct) : "—";
-      const optEdge = a.optimalNetEdgeApr != null ? fmt.pct(a.optimalNetEdgeApr) : "—";
-      const optEdgeCls = (a.optimalNetEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg";
+      const ee = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
+      const eeCell = ee == null ? "—" : fmt.pct(ee);
+      const eeCls = (ee || 0) >= 0 ? "ratio-pos" : "ratio-neg";
       const sel = poolId(p) === state.selected ? " selected" : "";
       return `<tr class="row${sel}" data-id="${poolId(p)}">
         <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.protocol || p.dex}</span></div></td>
@@ -877,8 +904,7 @@ function renderTable() {
         <td class="num">${bandCell}</td>
         <td class="num ${edgeCls}">${fmt.pct(a.netEdgeApr)}</td>
         <td class="num ${ratioCls}">${fmt.ratio(a.feeYieldRatio)}</td>
-        <td class="num">${optWidth}</td>
-        <td class="num ${optEdgeCls}">${optEdge}</td>
+        <td class="num ${eeCls}">${eeCell}</td>
         <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
       </tr>`;
     })
@@ -939,12 +965,14 @@ function renderDetail(p) {
        </div>`
     : "";
 
+  const kLabel = "±" + state.k + "σ";
+  const pPct = (containment(state.k) * 100).toFixed(0);
+  const ee = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
   const optHtml =
-    a.optimalWidthPct != null
-      ? `<div class="bars-title" title="Profit-optimal concentrated width: maximises amplified fees − amplified LVR − amortised rebalancing cost. Distinct from the containment band above.">Profit-optimal concentrated range</div>
+    ee != null
+      ? `<div class="bars-title" title="Expected net edge running the pool as a concentrated position at the ${kLabel} band: C·feeAPR·p − C·(σ²/8)·p − exit cost, where p≈${pPct}% is a time-in-range proxy. An estimate, not a guaranteed return.">Expected net edge @ ${kLabel} band (≈${pPct}% in range)</div>
        <div class="metric-grid">
-         <div class="metric"><div class="k">Optimal half-width</div><div class="v">±${fmt.pct(a.optimalWidthPct)}</div></div>
-         <div class="metric"><div class="k">Net edge @ optimum</div><div class="v ${(a.optimalNetEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.optimalNetEdgeApr)}</div></div>
+         <div class="metric"><div class="k">Expected net edge</div><div class="v ${ee >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(ee)}</div></div>
        </div>`
       : "";
 
@@ -1045,6 +1073,15 @@ function wireControls() {
     b.addEventListener("click", () => {
       state.horizonDays = parseFloat(b.dataset.horizon);
       setActive("#horizon-filters", b);
+      renderTable();
+      renderPosition();
+      if (state.selected) renderDetail(findSelected());
+    });
+  });
+  document.querySelectorAll("#k-filters .chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.k = parseFloat(b.dataset.k);
+      setActive("#k-filters", b);
       renderTable();
       renderPosition();
       if (state.selected) renderDetail(findSelected());

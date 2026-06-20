@@ -90,11 +90,14 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 	}
 
 	fee := feeTiers[d.rng.Intn(len(feeTiers))]
-	// Effective volatility of the pair: stable quote ~= base vol; otherwise the
-	// relative volatility of two correlated assets is a bit lower.
-	vol := base.vol
+	// Ratio (pool-price) volatility: the volatility of the base token priced in
+	// the quote token, which is what drives LVR. For a stable quote it equals the
+	// base asset's vol; for a volatile/volatile pair the two assets are correlated
+	// so the relative volatility is lower than either standalone USD vol (we model
+	// that with a sub-additive combination).
+	ratioVol := base.vol
 	if quote.vol > 0.1 {
-		vol = math.Hypot(base.vol, quote.vol) * 0.8
+		ratioVol = math.Hypot(base.vol, quote.vol) * 0.55
 	}
 
 	tvl := 250_000 + d.rng.Float64()*120_000_000
@@ -104,9 +107,12 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 	turnover := (0.02 + d.rng.Float64()*0.6) * (0.003 / fee)
 	volume := tvl * turnover
 
-	ohlc := geometricBrownianOHLC(d.rng, base.price, vol, 14*24) // 14 days hourly
-	closes := closesTail(ohlc, 7*24)                             // 7-day close tail
-	price := ohlc[len(ohlc)-1].Close
+	// The OHLC series is the pool RATIO price (base per quote), starting at the
+	// current exchange rate. USD prices below are single current values, sourced
+	// separately, exactly as the live source does.
+	ratio0 := base.price / quote.price
+	ohlc := geometricBrownianOHLC(d.rng, ratio0, ratioVol, 14*24) // 14 days hourly
+	closes := closesTail(ohlc, 7*24)                              // 7-day close tail
 
 	return RawPool{
 		Chain:          chain.Display,
@@ -121,7 +127,8 @@ func (d *Demo) makePool(chain Chain, dex string) RawPool {
 		FeeTier:        fee,
 		TVLUSD:         tvl,
 		Volume24hUSD:   volume,
-		PriceUSD:       price,
+		PriceUSD:       base.price,
+		QuotePriceUSD:  quote.price,
 		Closes:         closes,
 		OHLC:           ohlc,
 		PeriodsPerYear: 24 * 365,

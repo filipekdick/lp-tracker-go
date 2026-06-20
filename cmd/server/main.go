@@ -49,6 +49,8 @@ func main() {
 		PerChain:         envInt("POOLS_PER_CHAIN", 8),
 		Interval:         envDuration("SCAN_INTERVAL", 10*time.Minute),
 		PositionInterval: envDuration("POSITION_INTERVAL", 3*time.Minute),
+		MinTVLUSD:        envFloat("MIN_TVL_USD", scanner.DefaultMinTVLUSD),
+		MaxTurnover:      envFloat("MAX_TURNOVER", scanner.DefaultMaxTurnover),
 	}
 
 	source, implied := buildSources()

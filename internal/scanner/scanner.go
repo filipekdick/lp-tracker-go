@@ -23,6 +23,37 @@ type Config struct {
 	PerChain         int           // pools to keep per chain
 	Interval         time.Duration // informational cadence for manual pool scans
 	PositionInterval time.Duration // how often to refresh the LP position + hedge
+
+	// Junk-pool filter (applied to the already-fetched batch, no extra API cost).
+	// MinTVLUSD drops pools with negligible reserves; MaxTurnover drops pools
+	// whose 24h volume/TVL is implausibly high (the signature of wash trading,
+	// which otherwise produces impossible fee APRs). Zero disables a filter.
+	MinTVLUSD   float64
+	MaxTurnover float64
+}
+
+// DefaultMinTVLUSD and DefaultMaxTurnover are the filter defaults when the env
+// vars are unset. The TVL floor removes dust pools; the turnover cap removes
+// wash-trade pools (legitimate large pools clear both comfortably).
+const (
+	DefaultMinTVLUSD   = 250_000.0
+	DefaultMaxTurnover = 20.0
+)
+
+// filterPools drops pools below the TVL floor or above the turnover cap. A
+// non-positive threshold disables that check. Turnover is 24h volume / TVL.
+func filterPools(pools []datasource.RawPool, minTVL, maxTurnover float64) []datasource.RawPool {
+	out := pools[:0:0]
+	for _, p := range pools {
+		if minTVL > 0 && p.TVLUSD < minTVL {
+			continue
+		}
+		if maxTurnover > 0 && p.TVLUSD > 0 && p.Volume24hUSD/p.TVLUSD > maxTurnover {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // AnalyzedPool is a raw pool plus its analyzer result, as served to clients.
@@ -195,7 +226,7 @@ func (s *Scanner) scanPools(ctx context.Context) {
 			continue
 		}
 
-		newAnalyzed := s.analyze(ctx, raw)
+		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover))
 
 		s.mu.Lock()
 		// Merge results progressively
@@ -280,7 +311,7 @@ func (s *Scanner) retryFailed(ctx context.Context) {
 			continue
 		}
 
-		newAnalyzed := s.analyze(ctx, raw)
+		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover))
 
 		s.mu.Lock()
 		var merged []AnalyzedPool

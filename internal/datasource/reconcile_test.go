@@ -65,15 +65,17 @@ func TestLiveReconciliationFixture(t *testing.T) {
 		if !ok || !mr.OK {
 			t.Fatalf("method %s missing/not-ok", m)
 		}
-		t.Logf("%s: sigma=%.6f optWidth=%.6f netEdge=%.6f", m, mr.RealizedVol, mr.OptimalWidthPct, mr.OptimalNetEdgeAPR)
+		t.Logf("%s: sigma=%.6f edge1=%.6f edge2=%.6f", m, mr.RealizedVol, mr.ExpEdge1.NetEdgeAPR, mr.ExpEdge2.NetEdgeAPR)
 		if math.Abs(mr.RealizedVol-genSigma) > volTol {
 			t.Fatalf("%s sigma = %.4f, want %.2f ± %.2f", m, mr.RealizedVol, genSigma, volTol)
 		}
-		if mr.OptimalWidthPct <= 0 || math.IsNaN(mr.OptimalWidthPct) || math.IsInf(mr.OptimalWidthPct, 0) {
-			t.Fatalf("%s optimal width not finite/positive: %v", m, mr.OptimalWidthPct)
-		}
-		if math.IsNaN(mr.OptimalNetEdgeAPR) || math.IsInf(mr.OptimalNetEdgeAPR, 0) {
-			t.Fatalf("%s optimal net edge not finite: %v", m, mr.OptimalNetEdgeAPR)
+		for _, e := range []analyzer.BandEdgeResult{mr.ExpEdge1, mr.ExpEdge2} {
+			if math.IsNaN(e.NetEdgeAPR) || math.IsInf(e.NetEdgeAPR, 0) {
+				t.Fatalf("%s expected edge (k=%v) not finite: %v", m, e.K, e.NetEdgeAPR)
+			}
+			if e.Containment <= 0 || e.Containment >= 1 {
+				t.Fatalf("%s containment (k=%v) out of (0,1): %v", m, e.K, e.Containment)
+			}
 		}
 	}
 

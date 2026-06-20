@@ -162,10 +162,17 @@ func (g *GeckoTerminal) toRawPool(ctx context.Context, chain Chain, d poolData, 
 // within the one-request-per-pool GeckoTerminal budget. On failure it returns
 // nil so the analyzer simply skips realised volatility for that pool.
 //
+// The series is requested in the pool's NATIVE TOKEN terms (currency=token,
+// token=base), i.e. the base token priced in the quote token — the pool's own
+// ratio price. This is the volatility that matters for LVR: for a token/stable
+// pair it is ≈ the USD price (unchanged verdicts), but for a token/token pair it
+// is the (lower) relative volatility, not the base asset's standalone USD vol.
+// Current USD prices for valuation come from the pool attributes, not this call.
+//
 // 14 days hourly = 336 bars, the max GeckoTerminal returns per call (limit=336).
 func (g *GeckoTerminal) priceHistory(ctx context.Context, slug, address string) ([]float64, []analyzer.OHLCV, float64) {
 	var resp ohlcvResponse
-	url := fmt.Sprintf("%s/networks/%s/pools/%s/ohlcv/hour?aggregate=1&limit=336&currency=usd", g.baseURL, slug, address)
+	url := fmt.Sprintf("%s/networks/%s/pools/%s/ohlcv/hour?aggregate=1&limit=336&currency=token&token=base", g.baseURL, slug, address)
 	if err := g.getJSON(ctx, url, &resp); err != nil {
 		return nil, nil, 0
 	}

@@ -2,8 +2,8 @@ package analyzer
 
 // methods.go assembles the per-volatility-method view of a pool. Each method
 // produces its own realised sigma and the downstream metrics recomputed from
-// that sigma (LVR cost, net edge, fee/vol ratio, verdict), plus the Phase 2
-// range bands and the Phase 3 concentrated-LVR optimum.
+// that sigma (LVR cost, net edge, fee/vol ratio, verdict), the Phase 2 range
+// bands, and the expected net edge at the fixed ±1σ/±2σ bands.
 //
 // All methods are derived from the single OHLCV slice in Input.Bars, so the
 // whole map costs one API request per pool.
@@ -29,9 +29,10 @@ type MethodResult struct {
 	Band2Up     float64 `json:"band2Up"`   // +2σ up move
 	Band2Down   float64 `json:"band2Down"` // -2σ down move (positive magnitude)
 
-	// Phase 3: concentrated-LVR optimum.
-	OptimalWidthPct   float64 `json:"optimalWidthPct"`   // +width of the optimal range (fraction)
-	OptimalNetEdgeAPR float64 `json:"optimalNetEdgeApr"` // annualised net edge at that width
+	// Expected net edge at the fixed ±k-sigma band (k=1 and k=2), the
+	// time-in-range-weighted estimate that replaced the corner-prone optimum.
+	ExpEdge1 BandEdgeResult `json:"expEdge1"`
+	ExpEdge2 BandEdgeResult `json:"expEdge2"`
 }
 
 // buildMethods computes every selectable method from the supplied bars. feeAPR
@@ -73,15 +74,10 @@ func buildMethods(in Input, feeAPR float64) map[string]MethodResult {
 			mr.Band1Up, mr.Band1Down = b1.UpPct, b1.DownPct
 			mr.Band2Up, mr.Band2Down = b2.UpPct, b2.DownPct
 
-			// Phase 3: concentrated-LVR optimum at this method's sigma.
-			opt := OptimalConcentratedRange(ConcentratedInput{
-				FeeAPR:        feeAPR,
-				Sigma:         sigma,
-				HorizonDays:   horizon,
-				RebalanceCost: rebalCost,
-			})
-			mr.OptimalWidthPct = opt.WidthPct
-			mr.OptimalNetEdgeAPR = opt.NetEdgeAPR
+			// Expected net edge at the fixed ±1σ and ±2σ bands, with fee capture
+			// weighted by time-in-range (containment proxy). Bounded, comparable.
+			mr.ExpEdge1 = ExpectedBandEdge(BandEdgeInput{FeeAPR: feeAPR, Sigma: sigma, K: 1, HorizonDays: horizon, RebalanceCost: rebalCost})
+			mr.ExpEdge2 = ExpectedBandEdge(BandEdgeInput{FeeAPR: feeAPR, Sigma: sigma, K: 2, HorizonDays: horizon, RebalanceCost: rebalCost})
 		} else {
 			mr.Verdict = VerdictUnknown
 		}

@@ -77,12 +77,19 @@ func TestIntegrationSmokeDemo(t *testing.T) {
 			if num(t, m, "band1Up") < num(t, m, "band1Down") {
 				t.Fatalf("%s band1 up < down", key)
 			}
-			// Phase 3 optimum: width positive, net edge finite and >= full-range.
-			w := num(t, m, "optimalWidthPct")
-			if !(w > 0) || math.IsNaN(w) || math.IsInf(w, 0) {
-				t.Fatalf("%s optimal width implausible: %v", key, w)
+			// Expected net edge at the ±1σ and ±2σ bands: present, finite, with a
+			// sane containment proxy in (0,1).
+			for _, ek := range []string{"expEdge1", "expEdge2"} {
+				e, _ := m[ek].(map[string]any)
+				if e == nil {
+					t.Fatalf("%s missing %s", key, ek)
+				}
+				finite(t, e, "netEdgeApr")
+				cont := num(t, e, "containment")
+				if cont <= 0 || cont >= 1 {
+					t.Fatalf("%s %s containment out of (0,1): %v", key, ek, cont)
+				}
 			}
-			finite(t, m, "optimalNetEdgeApr")
 		}
 	}
 

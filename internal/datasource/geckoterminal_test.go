@@ -29,7 +29,11 @@ func TestGeckoSingleOHLCVCallPerPool(t *testing.T) {
 		path := r.URL.Path
 		switch {
 		case strings.Contains(path, "/ohlcv/"):
-			// .../pools/{address}/ohlcv/hour
+			// .../pools/{address}/ohlcv/hour — must request native-token (ratio)
+			// terms after the Part A fix.
+			if q := r.URL.Query(); q.Get("currency") != "token" || q.Get("token") != "base" {
+				t.Errorf("ohlcv request not in native-token terms: %s", r.URL.RawQuery)
+			}
 			addr := ohlcvAddress(path)
 			mu.Lock()
 			ohlcvHits[addr]++
