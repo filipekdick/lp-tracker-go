@@ -148,7 +148,7 @@
             <th data-sort="band" class="num" title="±kσ containment band over horizon T. Containment target, not a profit-optimal width.">Range ±kσ</th>
             <th data-sort="netEdge" class="num">Net edge</th>
             <th data-sort="ratio" class="num">Fee/Vol</th>
-            <th data-sort="expEdge" class="num" title="Expected net edge (APR) running the pool as a concentrated position at the ±kσ band, with fees weighted by time in range (containment proxy). An estimate, not a guaranteed return. Click to rank.">Exp. edge ±kσ</th>
+            <th data-sort="expEdge" class="num" title="Expected net edge (APR) at the ±kσ band. The fee yield is the pool's quoted yield (NOT amplified by concentration — feeAPR already reflects the pool's concentration); concentration only sharpens the impermanent-loss estimate. Weighted by time in range (containment proxy) and bounded by feeAPR. An estimate, not a guaranteed return. Click to rank.">Exp. edge ±kσ</th>
             <th data-sort="verdict">Verdict</th>
           </tr>
         </thead>
@@ -173,6 +173,6 @@
     <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Fee-implied σ = √(8·feeAPR).</span>
   </footer>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

@@ -36,7 +36,7 @@ type Config struct {
 // vars are unset. The TVL floor removes dust pools; the turnover cap removes
 // wash-trade pools (legitimate large pools clear both comfortably).
 const (
-	DefaultMinTVLUSD   = 250_000.0
+	DefaultMinTVLUSD   = 50_000.0
 	DefaultMaxTurnover = 20.0
 )
 

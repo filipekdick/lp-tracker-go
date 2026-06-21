@@ -78,9 +78,12 @@ function erf(x) {
 }
 
 // expectedEdge mirrors analyzer.ExpectedBandEdge so the column reacts live to the
-// σ-method, horizon-T and ±kσ toggles. See concentrated.go for the derivation:
+// σ-method, horizon-T and ±kσ toggles. See concentrated.go for the derivation.
+// The fee term is the pool's quoted yield weighted by time in range — NO C, since
+// feeAPR already reflects the pool's existing concentration. C amplifies only the
+// IL term. By construction netEdge ≤ feeAPR·p ≤ feeAPR.
 //   delta = k·σ·√(T/365);  C = 1/(1−e^{−δ/2});  p = erf(k/√2)
-//   netEdge = C·feeAPR·p − C·(σ²/8)·p − (σ²/δ²)·(gas + boundaryLoss(δ))
+//   netEdge = feeAPR·p − C·(σ²/8)·p − (σ²/δ²)·(gas + boundaryLoss(δ))
 function expectedEdge(feeApr, sigma, k, T) {
   if (feeApr == null) return null;
   const p = containment(k);
@@ -90,7 +93,18 @@ function expectedEdge(feeApr, sigma, k, T) {
   const s = Math.exp(delta / 2);
   const boundaryLoss = (s * (s - 1)) / (s * s + 1);
   const exit = ((sigma * sigma) / (delta * delta)) * (DEFAULT_REBALANCE_COST + boundaryLoss);
-  return C * feeApr * p - C * ((sigma * sigma) / 8) * p - exit;
+  return feeApr * p - C * ((sigma * sigma) / 8) * p - exit;
+}
+
+// breakevenSigma mirrors analyzer.BreakevenSigma: σ* = sqrt(8·feeAPR/C(δ)), the
+// realized vol at which the band breaks even. Reduces to sqrt(8·feeAPR) at full
+// range. Returns null when there's no usable band.
+function breakevenSigma(feeApr, sigma, k, T) {
+  if (!feeApr || feeApr <= 0) return null;
+  if (!sigma || sigma <= 0) return Math.sqrt(8 * feeApr); // C=1 fallback
+  const delta = k * sigma * Math.sqrt(T / 365);
+  const C = 1 / (1 - Math.exp(-delta / 2));
+  return Math.sqrt((8 * feeApr) / C);
 }
 
 // rangeBands returns the lognormal ±1σ and ±2σ containment bands for a sigma
@@ -968,11 +982,21 @@ function renderDetail(p) {
   const kLabel = "±" + state.k + "σ";
   const pPct = (containment(state.k) * 100).toFixed(0);
   const ee = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
+  const sStar = breakevenSigma(a.feeApr, a.realizedVol, state.k, state.horizonDays);
+  // Headroom: realized σ below σ* means the band is profitable; ratio σ*/σ.
+  const headroom =
+    sStar != null && a.realizedVol > 0 ? sStar / a.realizedVol : null;
+  const profitable = sStar != null && a.realizedVol > 0 && a.realizedVol < sStar;
+  const starRow =
+    sStar != null
+      ? `<div class="metric"><div class="k" title="Concentration-aware breakeven volatility σ* = √(8·feeAPR/C(δ)). The band is profitable while realized σ stays below σ*; at full range it equals the fee-implied σ.">Breakeven σ* @ ${kLabel}</div><div class="v ${profitable ? "ratio-pos" : "ratio-neg"}">${fmt.pct(sStar)}${headroom != null ? ` <span class="hint">(${headroom.toFixed(2)}× σ)</span>` : ""}</div></div>`
+      : "";
   const optHtml =
     ee != null
-      ? `<div class="bars-title" title="Expected net edge running the pool as a concentrated position at the ${kLabel} band: C·feeAPR·p − C·(σ²/8)·p − exit cost, where p≈${pPct}% is a time-in-range proxy. An estimate, not a guaranteed return.">Expected net edge @ ${kLabel} band (≈${pPct}% in range)</div>
+      ? `<div class="bars-title" title="Expected net edge running the pool as a concentrated position at the ${kLabel} band: feeAPR·p (pool yield, NOT amplified by concentration) − C·(σ²/8)·p (concentration sharpens only the IL term) − exit cost, where p≈${pPct}% is a time-in-range proxy. Bounded by feeAPR. An estimate, not a guaranteed return.">Expected net edge @ ${kLabel} band (≈${pPct}% in range)</div>
        <div class="metric-grid">
          <div class="metric"><div class="k">Expected net edge</div><div class="v ${ee >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(ee)}</div></div>
+         ${starRow}
        </div>`
       : "";
 
