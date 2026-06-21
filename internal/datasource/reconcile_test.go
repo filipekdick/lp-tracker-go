@@ -73,6 +73,11 @@ func TestLiveReconciliationFixture(t *testing.T) {
 			if math.IsNaN(e.NetEdgeAPR) || math.IsInf(e.NetEdgeAPR, 0) {
 				t.Fatalf("%s expected edge (k=%v) not finite: %v", m, e.K, e.NetEdgeAPR)
 			}
+			// Boundedness invariant (the corrected formula): edge <= feeAPR,
+			// replacing the previously exploded value.
+			if e.NetEdgeAPR > res.FeeAPR+1e-12 {
+				t.Fatalf("%s expected edge (k=%v) %.6f exceeds feeAPR %.6f", m, e.K, e.NetEdgeAPR, res.FeeAPR)
+			}
 			if e.Containment <= 0 || e.Containment >= 1 {
 				t.Fatalf("%s containment (k=%v) out of (0,1): %v", m, e.K, e.Containment)
 			}

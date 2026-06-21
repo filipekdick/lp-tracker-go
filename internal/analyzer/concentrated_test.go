@@ -83,78 +83,129 @@ func TestContainment(t *testing.T) {
 	}
 }
 
-// TestExpectedBandEdgeWeighting checks the central correction: the expected fee
-// term equals C(delta)*feeAPR*p, and switching k changes both delta and p.
-func TestExpectedBandEdgeWeighting(t *testing.T) {
-	in := BandEdgeInput{FeeAPR: 0.30, Sigma: 0.60, K: 1, HorizonDays: 1, RebalanceCost: 0.0005}
+// TestExpectedBandEdgeFeeTermHasNoC is the central correction: the fee term is
+// feeAPR*p with NO concentration factor, even when C is large. The IL term keeps
+// C. Switching k changes both delta and p.
+func TestExpectedBandEdgeFeeTermHasNoC(t *testing.T) {
+	// Small sigma -> tight band -> large C, the regime that used to blow up.
+	in := BandEdgeInput{FeeAPR: 0.30, Sigma: 0.05, K: 1, HorizonDays: 1, RebalanceCost: 0.0005}
 	r1 := ExpectedBandEdge(in)
 
-	// Fee term must equal C(delta)*feeAPR*p exactly.
-	wantFee := ConcentrationFactor(r1.Delta) * in.FeeAPR * Containment(1)
-	if math.Abs(r1.ExpectedFeeAPR-wantFee) > 1e-12 {
-		t.Fatalf("expected fee = %.12f, want C*feeAPR*p = %.12f", r1.ExpectedFeeAPR, wantFee)
+	if !(r1.ConcentrationC > 100) {
+		t.Fatalf("expected a large C for this regime, got %.3f", r1.ConcentrationC)
 	}
-	// LVR term weighted the same way.
+	// Fee term must equal feeAPR*p exactly — C must NOT appear.
+	wantFee := in.FeeAPR * Containment(1)
+	if math.Abs(r1.ExpectedFeeAPR-wantFee) > 1e-12 {
+		t.Fatalf("fee term = %.12f, want feeAPR*p = %.12f (no C)", r1.ExpectedFeeAPR, wantFee)
+	}
+	// Sanity: the (wrong) C-amplified value would be hundreds of % — confirm we
+	// are nowhere near it.
+	if r1.ExpectedFeeAPR > in.FeeAPR {
+		t.Fatalf("fee term %.4f exceeds feeAPR %.4f — C leaked in", r1.ExpectedFeeAPR, in.FeeAPR)
+	}
+	// IL term keeps C exactly.
 	wantLVR := ConcentrationFactor(r1.Delta) * LVRCost(in.Sigma) * Containment(1)
 	if math.Abs(r1.ExpectedLVRAPR-wantLVR) > 1e-12 {
-		t.Fatalf("expected lvr = %.12f, want C*(σ²/8)*p = %.12f", r1.ExpectedLVRAPR, wantLVR)
+		t.Fatalf("IL term = %.12f, want C*(σ²/8)*p = %.12f", r1.ExpectedLVRAPR, wantLVR)
 	}
-	// Net edge is fee - lvr - exit.
 	if math.Abs(r1.NetEdgeAPR-(r1.ExpectedFeeAPR-r1.ExpectedLVRAPR-r1.ExitCostAPR)) > 1e-12 {
 		t.Fatal("net edge != fee - lvr - exit")
 	}
 
 	in.K = 2
 	r2 := ExpectedBandEdge(in)
-	// delta doubles with k, p rises to ~0.95.
 	if math.Abs(r2.Delta-2*r1.Delta) > 1e-12 {
 		t.Fatalf("delta(k=2)=%.6f, want 2*delta(k=1)=%.6f", r2.Delta, 2*r1.Delta)
 	}
 	if !(r2.Containment > r1.Containment) {
 		t.Fatalf("p(k=2)=%.4f should exceed p(k=1)=%.4f", r2.Containment, r1.Containment)
 	}
+	// Still no C at k=2.
+	if math.Abs(r2.ExpectedFeeAPR-in.FeeAPR*Containment(2)) > 1e-12 {
+		t.Fatalf("k=2 fee term = %.12f, want feeAPR*p", r2.ExpectedFeeAPR)
+	}
 }
 
-// TestExpectedBandEdgeBounded checks the estimate is finite/bounded with no
-// corner-solution blowup, and that a negative-edge pool yields a sane negative.
-//
-// Unlike the removed optimiser — whose edge grew without limit as the grid floor
-// shrank (a clamp artifact) — this estimate is a single evaluation at the
-// principled ±kσ band, so it is finite and depends on no arbitrary clamp. For a
-// genuinely low-vol pool the idealised number is still large (the band is tight,
-// C is high, and feeAPR is taken independent of position size), but it is finite
-// and clamp-independent. The decisive anti-corner property is that raising
-// volatility — where the old model still pinned to the floor and blew up — now
-// widens the band, drives C→1, and keeps the edge near the full-range value.
-func TestExpectedBandEdgeBounded(t *testing.T) {
-	// Stablecoin-ish: low vol, healthy fees. Finite and positive.
-	stable := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.20, Sigma: 0.05, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
-	if math.IsNaN(stable.NetEdgeAPR) || math.IsInf(stable.NetEdgeAPR, 0) {
-		t.Fatalf("stable net edge not finite: %v", stable.NetEdgeAPR)
-	}
-	if stable.NetEdgeAPR <= 0 {
-		t.Fatalf("high-fee low-vol pool should have positive edge, got %v", stable.NetEdgeAPR)
-	}
-
-	// Anti-corner: a HIGH-vol, high-fee pool (where the optimiser used to pin the
-	// width at the floor and report an absurd edge in the hundreds) now yields a
-	// modest, finite number — the frequent-exit cost from the ±kσ band offsets the
-	// amplified fees instead of being ignored.
-	hiVol := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.20, Sigma: 1.0, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
-	if math.IsNaN(hiVol.NetEdgeAPR) || math.IsInf(hiVol.NetEdgeAPR, 0) {
-		t.Fatalf("high-vol edge not finite: %v", hiVol.NetEdgeAPR)
-	}
-	if math.Abs(hiVol.NetEdgeAPR) > 50 {
-		t.Fatalf("high-vol high-fee edge %.4f looks like a corner blowup", hiVol.NetEdgeAPR)
+// TestExpectedBandEdgeBoundedByFeeAPR is the headline boundedness invariant:
+// netEdge <= feeAPR for ANY pool, including a stable/stable pool with very small
+// sigma (which used to explode to hundreds of thousands of %). With costs off, a
+// tiny-sigma pool's edge approaches feeAPR*p — close to feeAPR, not above it.
+func TestExpectedBandEdgeBoundedByFeeAPR(t *testing.T) {
+	feeAPRs := []float64{0.01, 0.05, 0.20, 0.50, 1.0}
+	sigmas := []float64{1e-4, 0.01, 0.05, 0.2, 0.6, 1.2, 2.0}
+	ks := []float64{1, 2}
+	Ts := []float64{0.5, 1, 7}
+	for _, fee := range feeAPRs {
+		for _, sig := range sigmas {
+			for _, k := range ks {
+				for _, T := range Ts {
+					r := ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: sig, K: k, HorizonDays: T, RebalanceCost: 0.0005})
+					if math.IsNaN(r.NetEdgeAPR) || math.IsInf(r.NetEdgeAPR, 0) {
+						t.Fatalf("non-finite edge for fee=%v sig=%v k=%v T=%v", fee, sig, k, T)
+					}
+					// THE invariant: never above feeAPR (tiny epsilon for float slack).
+					if r.NetEdgeAPR > fee+1e-12 {
+						t.Fatalf("edge %.6f exceeds feeAPR %.6f (fee=%v sig=%v k=%v T=%v)", r.NetEdgeAPR, fee, fee, sig, k, T)
+					}
+				}
+			}
+		}
 	}
 
-	// High-vol, thin fees: LVR dominates -> negative but sane.
-	bad := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.02, Sigma: 1.2, K: 1, HorizonDays: 1, RebalanceCost: 0.0005})
-	if bad.NetEdgeAPR >= 0 {
-		t.Fatalf("thin-fee high-vol pool should have negative edge, got %v", bad.NetEdgeAPR)
+	// Stable/stable, very small sigma, costs off: edge -> feeAPR*p, i.e. close to
+	// feeAPR rather than orders of magnitude above it.
+	const fee = 0.30
+	st := ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: 1e-4, K: 1, HorizonDays: 1, RebalanceCost: 0})
+	want := fee * Containment(1)
+	if math.Abs(st.NetEdgeAPR-want) > 1e-3 {
+		t.Fatalf("tiny-sigma edge = %.6f, want ≈ feeAPR*p = %.6f", st.NetEdgeAPR, want)
 	}
-	if math.IsInf(bad.NetEdgeAPR, 0) || bad.NetEdgeAPR < -100 {
-		t.Fatalf("negative edge not sane/bounded: %v", bad.NetEdgeAPR)
+	if st.NetEdgeAPR > fee {
+		t.Fatalf("tiny-sigma edge %.6f exceeds feeAPR %.6f", st.NetEdgeAPR, fee)
+	}
+}
+
+// TestExpectedBandEdgeILReducesEdge confirms the C-amplified IL term meaningfully
+// reduces the edge for a volatile/volatile pool, by an amount that grows with
+// sigma.
+func TestExpectedBandEdgeILReducesEdge(t *testing.T) {
+	const fee = 0.40
+	mk := func(sig float64) BandEdgeResult {
+		return ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: sig, K: 1, HorizonDays: 1, RebalanceCost: 0})
+	}
+	lo := mk(0.3)
+	hi := mk(0.9)
+	// IL term is a real haircut below the fee term.
+	if !(lo.ExpectedLVRAPR > 0) || !(lo.ExpectedFeeAPR-lo.ExpectedLVRAPR < lo.ExpectedFeeAPR) {
+		t.Fatalf("IL term should reduce the edge, got LVR=%.6f", lo.ExpectedLVRAPR)
+	}
+	// Higher sigma -> larger IL haircut.
+	if !(hi.ExpectedLVRAPR > lo.ExpectedLVRAPR) {
+		t.Fatalf("IL haircut should grow with sigma: lo=%.6f hi=%.6f", lo.ExpectedLVRAPR, hi.ExpectedLVRAPR)
+	}
+}
+
+// TestBreakevenSigma checks the concentration-aware breakeven volatility: it
+// reduces to sqrt(8*feeAPR) at full range (C->1) and is strictly lower for a
+// tighter (higher-C) band.
+func TestBreakevenSigma(t *testing.T) {
+	const fee = 0.10
+	full := FeeImpliedVolatility(fee) // sqrt(8*feeAPR), the C=1 reference
+	// Large delta => C ≈ 1 => sigma* ≈ sqrt(8*feeAPR).
+	wide := BreakevenSigma(fee, 40)
+	if math.Abs(wide-full) > 1e-6 {
+		t.Fatalf("breakeven at full range = %.9f, want %.9f", wide, full)
+	}
+	// Tighter band (smaller delta, larger C) => strictly lower sigma*.
+	tight := BreakevenSigma(fee, 0.05)
+	if !(tight < full) {
+		t.Fatalf("tighter-band breakeven %.6f should be < full-range %.6f", tight, full)
+	}
+	// And it must match sqrt(8*feeAPR/C) exactly.
+	wantTight := math.Sqrt(8 * fee / ConcentrationFactor(0.05))
+	if math.Abs(tight-wantTight) > 1e-12 {
+		t.Fatalf("breakeven = %.12f, want sqrt(8*fee/C) = %.12f", tight, wantTight)
 	}
 }
 

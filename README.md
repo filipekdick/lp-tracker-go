@@ -115,36 +115,49 @@ calls; within-range reads 0% at the lower tick, 100% at the upper.
 
 ### Expected net edge at a fixed ±kσ band — `internal/analyzer/concentrated.go`
 
-Earlier this searched for a profit-*optimal* width, but the model amplifies fees
-by the concentration factor `C` without penalising a tight band with lost fees,
-so the search always pinned to a corner (grid floor / ceiling) — useless. It is
-replaced by the expected net edge at the **fixed ±kσ band** (the same band as
-above), with fee capture **weighted by time in range**:
+The expected net edge of running the pool as a concentrated position at the
+**fixed ±kσ band** (the same band as above), with fee capture weighted by time
+in range:
 
 - log half-width `δ = k·σ·√(T/365)`; concentration `C(δ) = 1/(1 − e^(−δ/2))`.
 - containment proxy `p = erf(k/√2)` (≈0.68 for k=1, ≈0.95 for k=2) — the fraction
-  of time the price is within the band. *This is the key correction*: a tighter
-  band has a larger `C` but a smaller `p`, so tighter no longer wins automatically.
+  of time the price is within the band.
 
 ```
-expectedFee = C·feeAPR·p
-expectedLVR = C·(σ²/8)·p
+expectedFee = feeAPR·p                                       ← NO concentration factor
+expectedLVR = C(δ)·(σ²/8)·p
 exitCost    = (σ²/δ²)·(rebalanceCost + boundaryLoss(δ))      boundaryLoss(δ)=s(s−1)/(s²+1), s=e^(δ/2)
 netEdge     = expectedFee − expectedLVR − exitCost
 ```
 
-`σ²/δ² = 365/(k²T)` is the boundary-exit rate (the BM first-exit rate), so the
-whole expression is **bounded and comparable across pools** (no corner blowup).
-`p` is a containment proxy for time-in-range; the number is an estimate, not a
-guaranteed return. Computed for k=1 and k=2 per method; the dashboard column and
+**The fee term has no `C`.** `feeAPR = volume·feeTier / TVL`, and TVL is the
+pool's *actual, already-concentrated* deposited capital, so `feeAPR` already is
+the yield of that concentration. Multiplying it by `C` again double-counts
+concentration — the bug this corrects (it blew up low-vol pairs to hundreds of
+thousands of %: tiny σ → tiny band → huge `C`). Concentration legitimately
+amplifies only the impermanent-loss term (and, implicitly, the exit term via the
+band width). Since `expectedLVR ≥ 0` and `exitCost ≥ 0`, this is **bounded by
+construction**: `netEdge ≤ feeAPR·p ≤ feeAPR`.
+
+**Concentration-aware breakeven volatility.** The same result read cleanly as a
+volatility:
+
+```
+σ* = √( 8·feeAPR / C(δ) )
+```
+
+— the realized vol at which fees exactly equal the amplified IL. With the exact
+`C(δ)`; at full range (`C → 1`) it reduces to the existing fee-implied vol
+`√(8·feeAPR)`, so it is a strict generalisation of that metric. If realized σ is
+below `σ*` the band is profitable, and `σ*/σ` is the headroom; both are shown in
+the detail panel. Computed for k=1 and k=2 per method; the dashboard column and
 detail card react to the ±kσ, horizon and σ-method toggles.
 
 **Assumptions / parameters** (configurable, with defaults): horizon `T`
 (`DefaultHorizonDays` = 1 day), `rebalanceCost` (`DefaultRebalanceCost` = 5 bps),
-GBM zero drift. feeAPR is the pool's current yield independent of position size,
-so a low-vol / high-fee pool still shows a large (but finite, clamp-independent)
-idealised edge — an upper bound. The reusable primitives (`ConcentrationFactor`,
-`boundaryLoss`, the same-width invariant) are unit-tested in `concentrated_test.go`.
+GBM zero drift. The reusable primitives (`ConcentrationFactor`, `boundaryLoss`,
+`BreakevenSigma`) are unit-tested in `concentrated_test.go`, and the boundedness
+invariant (`netEdge ≤ feeAPR`) is asserted across a grid of synthetic pools.
 
 ### Junk-pool filter (scanner) — `internal/scanner`
 
@@ -153,7 +166,7 @@ GeckoTerminal's pools endpoint only sorts by volume, so dust and wash-trade pool
 in-code on the already-fetched batch (no extra API call) **before** analysis and
 ranking:
 
-- `MIN_TVL_USD` — drop pools with reserves below this (default `$250,000`).
+- `MIN_TVL_USD` — drop pools with reserves below this (default `$50,000`).
 - `MAX_TURNOVER` — drop pools whose 24h-volume/TVL exceeds this (default `20`);
   absurd turnover is the signature of wash trading and the source of impossible
   yields. Legitimate large pools clear both. (`filter_test.go`.)
@@ -239,7 +252,7 @@ DATA_SOURCE=live SCAN_INTERVAL=10m go run ./cmd/server
 | `DATA_SOURCE` | `demo` | `demo` or `live` |
 | `SCAN_INTERVAL` | `10m` | wait between scans (`30s`, `5m`, `1h`, …) |
 | `POOLS_PER_CHAIN` | `8` | pools kept per chain |
-| `MIN_TVL_USD` | `250000` | drop pools with reserves below this (junk filter) |
+| `MIN_TVL_USD` | `50000` | drop pools with reserves below this (junk filter) |
 | `MAX_TURNOVER` | `20` | drop pools with 24h-volume/TVL above this (wash-trade filter) |
 | `CHAINS` | built-in set | comma-separated slugs, e.g. `eth,base,arbitrum` |
 | `TRACK_TOKEN_ID` | `71002035` | Aerodrome position token ID to track |

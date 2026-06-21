@@ -26,28 +26,49 @@ package analyzer
 // is within ±k-sigma of centre with probability p at the horizon). This is a
 // containment proxy, not a guaranteed return.
 //
-// Concentration factor (unchanged): C(delta) = 1 / (1 - e^{-delta/2}); while in
-// range BOTH fees and LVR are amplified by the same C.
+// Concentration factor: C(delta) = 1 / (1 - e^{-delta/2}).
 //
 // Expected net edge (annualised), at the fixed band:
 //
-//	expectedFee = C(delta) * feeAPR     * p        // amplified fees, weighted by time in range
-//	expectedLVR = C(delta) * (sigma^2/8) * p       // amplified LVR, weighted the same way
+//	expectedFee = feeAPR              * p   // pool yield, weighted by time in range — NO C
+//	expectedLVR = C(delta) * (sigma^2/8) * p   // amplified divergence cost — C belongs here
 //	exitCost    = (sigma^2 / delta^2) * (rebalanceCost + boundaryLoss(delta))
 //	netEdge     = expectedFee - expectedLVR - exitCost
+//
+// IMPORTANT — the fee term has NO concentration factor. feeAPR is already the
+// yield earned by the pool's existing (concentrated) deposited liquidity:
+// feeAPR = volume*feeTier / TVL, and TVL is the pool's actual, already-small
+// concentrated capital. Multiplying it by C again double-counts concentration —
+// the bug this corrects. The effect was worst for low-vol pairs (tiny sigma ->
+// tiny band -> huge C -> blown-up "edge"). Concentration legitimately appears
+// only on the impermanent-loss / LVR term (a concentrated position suffers
+// amplified divergence) and, implicitly, in the exit term via the band width.
+//
+// Boundedness invariant (by construction): expectedLVR >= 0 and exitCost >= 0, so
+//
+//	netEdge <= feeAPR * p <= feeAPR
 //
 // The exit term is the expected number of boundary exits per year (the BM
 // first-exit rate sigma^2/delta^2) times the per-exit cost (gas to re-centre
 // plus the realised divergence loss at the edge). Substituting delta gives
-// sigma^2/delta^2 = 365 / (k^2 * T), i.e. ~once per day for a ±1σ daily band, so
-// the whole expression is bounded and comparable across pools.
+// sigma^2/delta^2 = 365 / (k^2 * T), i.e. ~once per day for a ±1σ daily band.
+//
+// Breakeven volatility. A clean, bounded way to read the same result is the
+// concentration-aware breakeven sigma — the realised vol at which fees exactly
+// equal the amplified IL (expectedFee == expectedLVR):
+//
+//	sigma_star = sqrt( 8 * feeAPR / C(delta) )
+//
+// using the EXACT C(delta). At full range (delta -> inf, C -> 1) this reduces to
+// the existing fee-implied volatility sqrt(8*feeAPR), so it is a strict
+// generalisation of that metric. If realised sigma < sigma_star the band is
+// profitable, and sigma_star / sigma is the headroom.
 //
 // Modelling assumptions (for the report):
 //   - GBM with zero drift in log-price (LVR's standard assumption).
 //   - Terminal containment p used as a time-in-range proxy.
-//   - feeAPR is the pool's current yield, taken independent of position size, so
-//     a very-low-vol / high-fee pool still shows a large (but finite, non-corner)
-//     idealised edge — an upper bound, not a guaranteed return.
+//   - feeAPR is the pool's quoted yield at its current concentration; we do NOT
+//     re-amplify it, so the estimate is bounded above by feeAPR.
 
 import "math"
 
@@ -86,6 +107,21 @@ func boundaryLoss(delta float64) float64 {
 	return s * (s - 1) / (s*s + 1)
 }
 
+// BreakevenSigma returns the concentration-aware breakeven volatility for a band
+// of log half-width delta: sigma* = sqrt(8 * feeAPR / C(delta)), the realised vol
+// at which fee income exactly equals the amplified IL. Uses the EXACT C(delta);
+// at full range (C -> 1) it reduces to the fee-implied vol sqrt(8*feeAPR).
+func BreakevenSigma(feeAPR, delta float64) float64 {
+	if feeAPR <= 0 {
+		return 0
+	}
+	c := ConcentrationFactor(delta)
+	if c <= 0 || math.IsInf(c, 0) {
+		return 0 // degenerate (zero-width band): breaks even only at zero vol
+	}
+	return math.Sqrt(8 * feeAPR / c)
+}
+
 // Containment returns p = erf(k/sqrt2), the probability a standard normal lands
 // within ±k. ≈0.6827 for k=1, ≈0.9545 for k=2.
 func Containment(k float64) float64 {
@@ -111,10 +147,11 @@ type BandEdgeResult struct {
 	WidthPct       float64 `json:"widthPct"`       // e^delta - 1, the +range as a fraction
 	Containment    float64 `json:"containment"`    // p, the time-in-range proxy
 	ConcentrationC float64 `json:"concentrationC"` // C(delta)
-	ExpectedFeeAPR float64 `json:"expectedFeeApr"` // C*feeAPR*p
+	ExpectedFeeAPR float64 `json:"expectedFeeApr"` // feeAPR*p (NO concentration factor)
 	ExpectedLVRAPR float64 `json:"expectedLvrApr"` // C*(sigma^2/8)*p
 	ExitCostAPR    float64 `json:"exitCostApr"`    // (sigma^2/delta^2)*(gas+boundaryLoss)
-	NetEdgeAPR     float64 `json:"netEdgeApr"`     // expectedFee - expectedLVR - exitCost
+	NetEdgeAPR     float64 `json:"netEdgeApr"`     // expectedFee - expectedLVR - exitCost (<= feeAPR)
+	SigmaStar      float64 `json:"sigmaStar"`      // breakeven vol sqrt(8*feeAPR/C(delta))
 }
 
 // ExpectedBandEdge computes the expected net edge of running the pool as a
@@ -137,11 +174,12 @@ func ExpectedBandEdge(in BandEdgeInput) BandEdgeResult {
 	res := BandEdgeResult{K: k, Containment: p}
 
 	// Degenerate: a flat series has no width and no LVR; a position never exits,
-	// so it captures fees with no amplification claim and no exit cost.
+	// so it captures fees with no exit cost. Report the full-range (C=1) breakeven.
 	if in.Sigma <= 0 {
 		res.ConcentrationC = 1
 		res.ExpectedFeeAPR = in.FeeAPR * p
 		res.NetEdgeAPR = res.ExpectedFeeAPR
+		res.SigmaStar = FeeImpliedVolatility(in.FeeAPR)
 		return res
 	}
 
@@ -151,9 +189,13 @@ func ExpectedBandEdge(in BandEdgeInput) BandEdgeResult {
 	res.Delta = delta
 	res.WidthPct = math.Exp(delta) - 1
 	res.ConcentrationC = c
-	res.ExpectedFeeAPR = c * in.FeeAPR * p
+	// Fee term is the pool's quoted yield weighted by time in range — NO C, since
+	// feeAPR already reflects the pool's existing concentration (see file header).
+	res.ExpectedFeeAPR = in.FeeAPR * p
+	// Concentration amplifies only the impermanent-loss / LVR term.
 	res.ExpectedLVRAPR = c * LVRCost(in.Sigma) * p
 	res.ExitCostAPR = (in.Sigma * in.Sigma) / (delta * delta) * (gas + boundaryLoss(delta))
 	res.NetEdgeAPR = res.ExpectedFeeAPR - res.ExpectedLVRAPR - res.ExitCostAPR
+	res.SigmaStar = BreakevenSigma(in.FeeAPR, delta)
 	return res
 }

@@ -78,13 +78,19 @@ func TestIntegrationSmokeDemo(t *testing.T) {
 				t.Fatalf("%s band1 up < down", key)
 			}
 			// Expected net edge at the ±1σ and ±2σ bands: present, finite, with a
-			// sane containment proxy in (0,1).
+			// sane containment proxy in (0,1), and bounded by feeAPR (the corrected,
+			// no-double-counting invariant).
+			feeAPR := num(t, a, "feeApr")
 			for _, ek := range []string{"expEdge1", "expEdge2"} {
 				e, _ := m[ek].(map[string]any)
 				if e == nil {
 					t.Fatalf("%s missing %s", key, ek)
 				}
 				finite(t, e, "netEdgeApr")
+				if num(t, e, "netEdgeApr") > feeAPR+1e-9 {
+					t.Fatalf("%s %s edge %v exceeds feeAPR %v", key, ek, e["netEdgeApr"], feeAPR)
+				}
+				finite(t, e, "sigmaStar")
 				cont := num(t, e, "containment")
 				if cont <= 0 || cont >= 1 {
 					t.Fatalf("%s %s containment out of (0,1): %v", key, ek, cont)
