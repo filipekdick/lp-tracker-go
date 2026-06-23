@@ -259,10 +259,23 @@ function renderPosition() {
   const curV0 = (p.amount0 || 0) * price0;
   const curV1 = (p.amount1 || 0) * price1;
   const totalV = curV0 + curV1 || p.valueUsd || 0;
-  const hedgePnl = (p.hedges || []).reduce(
+  const hedgeUnrealized = (p.hedges || []).reduce(
     (s, h) => s + (h.unrealizedPnl || 0),
     0,
   );
+  // Hedge income ledger (cumulative USD since inception, re-derived from Binance
+  // income history). Signs: realized & funding signed; commissions a paid cost.
+  const hedgeRealized = p.hedgeRealizedPnl || 0;
+  const hedgeFunding = p.hedgeFundingUsd || 0;
+  const hedgeCommissions = p.hedgeCommissionsUsd || 0;
+  // Complete hedge PnL = cumulative realized (closed legs) + current unrealized
+  // (open position). The two are disjoint, so they add without double-counting.
+  const hedgePnl = hedgeRealized + hedgeUnrealized;
+  // LP fee ledger: what a harvest realizes now vs the cumulative total that
+  // survives harvests. Fall back to the live uncollected USD for old payloads.
+  const feesToCollect =
+    p.feesToCollectUsd != null ? p.feesToCollectUsd : feesUsd;
+  const feesTotal = p.feesTotalUsd != null ? p.feesTotalUsd : feesUsd;
 
   // HODL comparison & impermanent loss need a captured baseline.
   let depositVal = null,
@@ -289,7 +302,9 @@ function renderPosition() {
       : totalV -
         (depositVal != null ? depositVal : totalV) +
         hedgePnl +
-        feesUsd;
+        hedgeFunding -
+        hedgeCommissions +
+        feesToCollect;
 
   const cls = (n) => (n >= 0 ? "ratio-pos" : "ratio-neg");
   const signed = (n) => (n >= 0 ? "+" : "") + fmt.usd(n);
@@ -310,9 +325,10 @@ function renderPosition() {
     </div>
     <div class="pcard">
       <div class="pcard-head"><span class="pcard-ico">🪙</span>Earning</div>
-      <div class="pcard-big ratio-pos">${fmt.usd(feesUsd)}</div>
+      <div class="pcard-big ratio-pos">${fmt.usd(feesTotal)}</div>
       <div class="pcard-subs">
-        ${kv("Unclaimed fees", fmt.usd(feesUsd))}
+        ${kv("Fees to collect", fmt.usd(feesToCollect))}
+        ${kv("Total since start", fmt.usd(feesTotal))}
         ${kv("Fee APR", fmt.pct(a.positionFeeApr || a.feeApr))}
       </div>
     </div>
@@ -322,7 +338,7 @@ function renderPosition() {
       <div class="pcard-subs">
         ${kv("vs HODL (IL)", il != null ? `<span class="${cls(il)}">${fmt.usd(il)}</span>` : "—")}
         ${kv("ROI", roi != null ? `<span class="${cls(roi)}">${roi.toFixed(2)}%</span>` : "—")}
-        ${kv("Hedge PnL", `<span class="${cls(hedgePnl)}">${fmt.usd(hedgePnl)}</span>`)}
+        ${kv("Hedge PnL (real.+unr.)", `<span class="${cls(hedgePnl)}">${fmt.usd(hedgePnl)}</span>`)}
       </div>
     </div>`;
 
@@ -409,7 +425,8 @@ function renderPosition() {
     <div class="liq-head"><span></span><span>Unclaimed</span></div>
     ${feeRow(p.symbol0, unc0, fees0)}
     ${feeRow(p.symbol1, unc1, fees1)}
-    <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
+    <div class="kv liq-total"><span class="k">Fees to collect (now)</span><span class="v"><span class="ratio-pos">${fmt.usd(feesToCollect)}</span></span></div>
+    <div class="kv liq-total"><span class="k" title="Cumulative collected + uncollected since strategy start. Survives harvests — it never resets when fees are collected.">Total fees since start</span><span class="v"><span class="ratio-pos">${fmt.usd(feesTotal)}</span></span></div>
     <div class="kv liq-total" style="margin-top:8px"><span class="k">Fee APR</span><span class="v">${fmt.pct(av.positionFeeApr || av.feeApr)}</span></div>
     ${kv("Net edge APR", `<span class="${(av.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(av.netEdgeApr)}</span>`)}
     ${headLine}
@@ -458,6 +475,21 @@ function renderPosition() {
         ${kv("Entry / mark", (h.entryPrice ? fmt.price(h.entryPrice) : "—") + " / " + (h.markPrice ? fmt.price(h.markPrice) : "—"))}
         ${kv("Short PnL", `<span class="${pnlCls}">${h.available ? fmt.usd(h.unrealizedPnl) : "—"}</span>`)}`;
     });
+  }
+
+  // Cumulative hedge PnL ledger (re-derived from Binance income history since
+  // inception), shown once for the whole hedge rather than per-leg. Realized and
+  // funding are signed; commissions are a paid cost shown negative.
+  if (hedges.length > 0) {
+    const partialNote = p.hedgeIncomePartial
+      ? ' <span class="pill drift" title="Strategy inception predates the income lookback window, so these totals are partial.">partial</span>'
+      : "";
+    hedgeBody += `<div style="border-top: 1px solid var(--border); margin: 12px 0;"></div>
+      ${kv("Realized PnL (closed legs)", `<span class="${cls(hedgeRealized)}">${fmt.usd(hedgeRealized)}</span>`)}
+      ${kv("Unrealized PnL (open)", `<span class="${cls(hedgeUnrealized)}">${fmt.usd(hedgeUnrealized)}</span>`)}
+      ${kv("Complete hedge PnL", `<span class="${cls(hedgePnl)}">${fmt.usd(hedgePnl)}</span>`)}
+      ${kv("Funding (signed)" + partialNote, `<span class="${cls(hedgeFunding)}">${fmt.usd(hedgeFunding)}</span>`)}
+      ${kv("Commissions paid", `<span class="ratio-neg">${fmt.usd(-hedgeCommissions)}</span>`)}`;
   }
 
   const allSync = hedges.length > 0 && hedges.every((h) => h.inSync);
@@ -567,7 +599,7 @@ function renderPosition() {
       ${kv("Total PnL", `<span class="${pnlCls}">${fmt.usd(netPnl)}</span>`)}
       ${kv("Return", `<span class="${pnlCls}">${pct.toFixed(2)}%</span>`)}
       ${kv("APR", `<span class="${pnlCls}">${aprStr}</span>`)}
-      ${kv("Collected Fees", fmt.usd(cur.feesUsd))}
+      ${kv("Total Fees (since start)", fmt.usd(cur.feesUsd))}
     </div>`;
 
     let canvasHtml = `<div id="pnl-chart-wrapper" style="position: relative; height: 340px; width: 100%;"><canvas id="pnl-chart"></canvas></div>`;
@@ -614,8 +646,11 @@ function renderChart(p) {
   // Right axis: absolute USD lines.
   const feesData = history.map((h) => (h.feesUsd || 0) - baseFees);
   const pnlData = history.map((h) => h.netPnl || 0);
-  // The slice of PnL that fees don't explain is the residual from the LP and
-  // the hedge not staying perfectly in sync (impermanent loss + delta drift).
+  // The slice of PnL that fees don't explain is the LP–hedge mismatch: net PnL
+  // minus the cumulative fees. With the complete hedge PnL now in net PnL (LP
+  // change + hedge realized + unrealized + funding − commissions), this is the
+  // true impermanent-loss residual, not the old accounting gap that ignored the
+  // realized PnL banked out of the open short at each rebalance.
   const lpHedgeDiff = history.map(
     (h) => (h.netPnl || 0) - ((h.feesUsd || 0) - baseFees),
   );
