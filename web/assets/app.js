@@ -18,11 +18,6 @@ const state = {
   k: 1, // band width in sigmas (1 or 2) for the bands and expected edge
 };
 
-// DEFAULT_REBALANCE_COST mirrors analyzer.DefaultRebalanceCost (gas per
-// re-centre, fraction of value), so the client-side expected-edge recompute
-// matches the server when the horizon/band toggles move off the defaults.
-const DEFAULT_REBALANCE_COST = 0.0005;
-
 // view returns the analysis fields for a pool under the currently selected
 // volatility method. The server precomputes every method (one OHLCV call per
 // pool) into analysis.methods; when that method is usable we read its sigma and
@@ -59,52 +54,28 @@ function view(p) {
   });
 }
 
-// containment returns p = erf(k/√2), the time-in-range proxy (≈0.6827 for k=1,
-// ≈0.9545 for k=2). Uses a rational approximation of erf (no Math.erf in JS).
-function containment(k) {
-  return erf(k / Math.SQRT2);
-}
-function erf(x) {
-  // Abramowitz & Stegun 7.1.26, |error| < 1.5e-7 — ample for a display proxy.
-  const t = 1 / (1 + 0.3275911 * Math.abs(x));
-  const y =
-    1 -
-    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
-      t +
-      0.254829592) *
-      t *
-      Math.exp(-x * x);
-  return x < 0 ? -y : y;
+// volHeadroom mirrors analyzer.VolHeadroom: how many times the breakeven
+// (fee-implied) volatility exceeds the realized volatility, σ_be/σ, where the
+// breakeven σ_be = √(8·feeAPR) is the server's fee-implied σ (a.feeImpliedVol).
+// It is concentration-invariant — fees AND impermanent loss are amplified by the
+// same factor C, so C and the position width cancel (the full-range form of the
+// Gemini concentrated breakeven 2·√(feeAPR·w)). Above 1× means fees overpay for
+// the volatility that actually happened. It is the √ of the old fee/vol APR ratio.
+function volHeadroom(feeImpliedVol, realizedVol) {
+  if (!feeImpliedVol || !realizedVol || realizedVol <= 0) return null;
+  return feeImpliedVol / realizedVol;
 }
 
-// expectedEdge mirrors analyzer.ExpectedBandEdge so the column reacts live to the
-// σ-method, horizon-T and ±kσ toggles. See concentrated.go for the derivation.
-// The fee term is the pool's quoted yield weighted by time in range — NO C, since
-// feeAPR already reflects the pool's existing concentration. C amplifies only the
-// IL term. By construction netEdge ≤ feeAPR·p ≤ feeAPR.
-//   delta = k·σ·√(T/365);  C = 1/(1−e^{−δ/2});  p = erf(k/√2)
-//   netEdge = feeAPR·p − C·(σ²/8)·p − (σ²/δ²)·(gas + boundaryLoss(δ))
-function expectedEdge(feeApr, sigma, k, T) {
-  if (feeApr == null) return null;
-  const p = containment(k);
-  if (!sigma || sigma <= 0) return feeApr * p; // flat series: fee capture, no LVR/exits
-  const delta = k * sigma * Math.sqrt(T / 365);
-  const C = 1 / (1 - Math.exp(-delta / 2));
-  const s = Math.exp(delta / 2);
-  const boundaryLoss = (s * (s - 1)) / (s * s + 1);
-  const exit = ((sigma * sigma) / (delta * delta)) * (DEFAULT_REBALANCE_COST + boundaryLoss);
-  return feeApr * p - C * ((sigma * sigma) / 8) * p - exit;
-}
-
-// breakevenSigma mirrors analyzer.BreakevenSigma: σ* = sqrt(8·feeAPR/C(δ)), the
-// realized vol at which the band breaks even. Reduces to sqrt(8·feeAPR) at full
-// range. Returns null when there's no usable band.
-function breakevenSigma(feeApr, sigma, k, T) {
-  if (!feeApr || feeApr <= 0) return null;
-  if (!sigma || sigma <= 0) return Math.sqrt(8 * feeApr); // C=1 fallback
-  const delta = k * sigma * Math.sqrt(T / 365);
-  const C = 1 / (1 - Math.exp(-delta / 2));
-  return Math.sqrt((8 * feeApr) / C);
+// expectedTimeInRange mirrors analyzer.ExpectedTimeInRangeDays: the idealized
+// mean time the price stays inside a ±kσ band before touching an edge, under
+// driftless GBM with instant re-centring. The first-passage mean δ²/σ² with the
+// band's own width δ=k·σ·√(T/365) cancels σ and gives k²·T days. Informational
+// only — it does NOT depend on volatility (the band is sized by σ) and never
+// feeds the verdict. Idealized mean, not a guarantee; the price can re-touch the
+// edge several times.
+function expectedTimeInRange(k, T) {
+  if (!k || k <= 0 || !T || T <= 0) return null;
+  return k * k * T; // days
 }
 
 // rangeBands returns the lognormal ±1σ and ±2σ containment bands for a sigma
@@ -139,6 +110,12 @@ const fmt = {
   ratio(x) {
     if (!x || !isFinite(x)) return "—";
     return x.toFixed(2) + "×";
+  },
+  // duration formats an expected time in range: days, or hours when under a day.
+  duration(days) {
+    if (days == null || !isFinite(days)) return "—";
+    if (days < 1) return (days * 24).toFixed(days * 24 < 10 ? 1 : 0) + "h";
+    return days.toFixed(days < 10 ? 1 : 0) + "d";
   },
   price(n) {
     if (n == null) return "—";
@@ -400,7 +377,7 @@ function renderPosition() {
   // Fee-vs-volatility analysis (uses the selected σ method / horizon / band).
   const av = view(p);
   const vols = [
-    { label: "Fee-implied σ", val: av.feeImpliedVol, cls: "fees" },
+    { label: "Breakeven σ", val: av.feeImpliedVol, cls: "fees" },
     { label: "Realized σ", val: av.realizedVol, cls: "realized" },
   ];
   if (av.hasImplied)
@@ -413,18 +390,19 @@ function renderPosition() {
   const dnK = pb ? (state.k === 2 ? pb.dn2 : pb.dn1) : null;
   const bandLine = pb
     ? kv(
-        `Ideal range ±${state.k}σ / ${Tlbl}`,
+        `LP range ±${state.k}σ / ${Tlbl}`,
         `<span class="ratio-pos">+${fmt.pct(upK)}</span> / <span class="ratio-neg">-${fmt.pct(dnK)}</span>`,
       )
     : "";
-  const eePos = expectedEdge(av.feeApr, av.realizedVol, state.k, state.horizonDays);
-  const eeLine =
-    eePos != null
-      ? kv(
-          `Exp. edge ±${state.k}σ`,
-          `<span class="${eePos >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(eePos)}</span>`,
-        )
-      : "";
+  const tir = expectedTimeInRange(state.k, state.horizonDays);
+  const tirLine = kv(`Time in range ±${state.k}σ`, fmt.duration(tir));
+  const headroom = volHeadroom(av.feeImpliedVol, av.realizedVol);
+  const headLine = kv(
+    "Vol headroom",
+    headroom == null
+      ? "—"
+      : `<span class="${headroom >= 1 ? "ratio-pos" : "ratio-neg"}">${headroom.toFixed(2)}×</span>`,
+  );
 
   const feesRewards = `<div class="tcard fees-card">
     <h3>Fees &amp; Rewards <span class="verdict ${verdictCls}">${av.verdict || "—"}</span></h3>
@@ -434,8 +412,9 @@ function renderPosition() {
     <div class="kv liq-total"><span class="k">Total fees &amp; rewards</span><span class="v"><span class="ratio-pos">${fmt.usd(feesUsd)}</span></span></div>
     <div class="kv liq-total" style="margin-top:8px"><span class="k">Fee APR</span><span class="v">${fmt.pct(av.positionFeeApr || av.feeApr)}</span></div>
     ${kv("Net edge APR", `<span class="${(av.netEdgeApr || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(av.netEdgeApr)}</span>`)}
+    ${headLine}
     ${bandLine}
-    ${eeLine}
+    ${tirLine}
     <div class="bars" style="margin-top:10px">
       ${vols
         .map(
@@ -446,7 +425,7 @@ function renderPosition() {
         )
         .join("")}
     </div>
-    <p class="hint" style="margin-top:8px">±σ bands are a containment target (≈68%/≈95%); Exp. edge weights amplified fees by time in range — an estimate, not a guaranteed return.</p>
+    <p class="hint" style="margin-top:8px">±σ bands are range-sizing guidance (≈68%/≈95% in range over T), not an edge. Breakeven σ = √(8·feeAPR) is optimistic — it assumes full range; the pool's real on-chain concentration would lower it — and counts swap fees only (excludes farm/gauge incentives like AERO). Time in range is an idealized mean, not a guarantee, and undercounts edge re-touches.</p>
   </div>`;
 
   // Hedge card.
@@ -836,13 +815,17 @@ function sortKey(p) {
       const b = rangeBands(a.realizedVol, state.horizonDays);
       return b ? (state.k === 2 ? b.up2 : b.up1) : -1;
     }
+    case "timeInRange": {
+      // k²·T is the same for every pool (σ cancels); kept so the column is
+      // clickable, but it does not reorder rows.
+      const t = expectedTimeInRange(state.k, state.horizonDays);
+      return t == null ? -Infinity : t;
+    }
     case "netEdge":
       return a.netEdgeApr;
-    case "ratio":
-      return a.feeYieldRatio;
-    case "expEdge": {
-      const e = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
-      return e == null ? -Infinity : e;
+    case "headroom": {
+      const h = volHeadroom(a.feeImpliedVol, a.realizedVol);
+      return h == null ? -Infinity : h;
     }
     case "verdict":
       return a.verdict;
@@ -895,7 +878,6 @@ function renderTable() {
   body.innerHTML = pools
     .map((p) => {
       const a = view(p);
-      const ratioCls = a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg";
       const edgeCls = a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg";
       const b = rangeBands(a.realizedVol, state.horizonDays);
       const up = b ? (state.k === 2 ? b.up2 : b.up1) : null;
@@ -903,9 +885,10 @@ function renderTable() {
       const bandCell = b
         ? `<span class="ratio-pos">+${fmt.pct(up)}</span> / <span class="ratio-neg">-${fmt.pct(dn)}</span>`
         : "—";
-      const ee = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
-      const eeCell = ee == null ? "—" : fmt.pct(ee);
-      const eeCls = (ee || 0) >= 0 ? "ratio-pos" : "ratio-neg";
+      const tirCell = fmt.duration(expectedTimeInRange(state.k, state.horizonDays));
+      const headroom = volHeadroom(a.feeImpliedVol, a.realizedVol);
+      const headCls = (headroom || 0) >= 1 ? "ratio-pos" : "ratio-neg";
+      const headCell = headroom == null ? "—" : headroom.toFixed(2) + "×";
       const sel = poolId(p) === state.selected ? " selected" : "";
       return `<tr class="row${sel}" data-id="${poolId(p)}">
         <td><div class="pool-cell"><span class="pool-name">${p.name}</span><span class="pool-dex">${p.protocol || p.dex}</span></div></td>
@@ -916,9 +899,9 @@ function renderTable() {
         <td class="num">${fmt.pct(a.realizedVol)}</td>
         <td class="num">${fmt.pct(a.feeImpliedVol)}</td>
         <td class="num">${bandCell}</td>
+        <td class="num">${tirCell}</td>
         <td class="num ${edgeCls}">${fmt.pct(a.netEdgeApr)}</td>
-        <td class="num ${ratioCls}">${fmt.ratio(a.feeYieldRatio)}</td>
-        <td class="num ${eeCls}">${eeCell}</td>
+        <td class="num ${headCls}">${headCell}</td>
         <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
       </tr>`;
     })
@@ -957,7 +940,7 @@ function renderDetail(p) {
     gk: "Garman-Klass · 14d",
   }[state.method];
   const vols = [
-    { label: "Fee-implied σ", val: a.feeImpliedVol, cls: "fees" },
+    { label: "Breakeven σ", val: a.feeImpliedVol, cls: "fees" },
     { label: "Realized σ", val: a.realizedVol, cls: "realized" },
   ];
   if (a.hasImplied)
@@ -968,37 +951,22 @@ function renderDetail(p) {
     });
   const maxVol = Math.max(...vols.map((v) => v.val), 0.0001);
 
+  const headroom = volHeadroom(a.feeImpliedVol, a.realizedVol);
+
   const b = rangeBands(a.realizedVol, state.horizonDays);
   const T = state.horizonDays;
   const Tlabel = T < 1 ? T * 24 + "h" : T + "d";
+  const tir1 = expectedTimeInRange(1, T);
+  const tir2 = expectedTimeInRange(2, T);
   const bandsHtml = b
-    ? `<div class="bars-title" title="Lognormal containment band over T=${Tlabel}. This is a containment target (≈68% / ≈95%), NOT a profit-optimal width.">Ideal range — ±σ containment over ${Tlabel}</div>
+    ? `<div class="bars-title" title="±kσ range-sizing guidance: where to set the LP to stay in range ≈68% (k=1) / ≈95% (k=2) of the time over T=${Tlabel}. A containment target, NOT an edge or a return.">LP range — ±σ containment over ${Tlabel}</div>
        <div class="metric-grid">
          <div class="metric"><div class="k">±1σ (≈68%)</div><div class="v"><span class="ratio-pos">+${fmt.pct(b.up1)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn1)}</span></div></div>
          <div class="metric"><div class="k">±2σ (≈95%)</div><div class="v"><span class="ratio-pos">+${fmt.pct(b.up2)}</span> / <span class="ratio-neg">-${fmt.pct(b.dn2)}</span></div></div>
+         <div class="metric"><div class="k" title="Expected time in range = k²·T days under driftless GBM with instant re-centring; σ cancels because the band is sized by σ. Informational only — an idealized mean, not a guarantee; the price can re-touch the edge several times.">Time in range ±1σ</div><div class="v">${fmt.duration(tir1)}</div></div>
+         <div class="metric"><div class="k" title="Expected time in range = k²·T days. Informational only; does not feed the verdict.">Time in range ±2σ</div><div class="v">${fmt.duration(tir2)}</div></div>
        </div>`
     : "";
-
-  const kLabel = "±" + state.k + "σ";
-  const pPct = (containment(state.k) * 100).toFixed(0);
-  const ee = expectedEdge(a.feeApr, a.realizedVol, state.k, state.horizonDays);
-  const sStar = breakevenSigma(a.feeApr, a.realizedVol, state.k, state.horizonDays);
-  // Headroom: realized σ below σ* means the band is profitable; ratio σ*/σ.
-  const headroom =
-    sStar != null && a.realizedVol > 0 ? sStar / a.realizedVol : null;
-  const profitable = sStar != null && a.realizedVol > 0 && a.realizedVol < sStar;
-  const starRow =
-    sStar != null
-      ? `<div class="metric"><div class="k" title="Concentration-aware breakeven volatility σ* = √(8·feeAPR/C(δ)). The band is profitable while realized σ stays below σ*; at full range it equals the fee-implied σ.">Breakeven σ* @ ${kLabel}</div><div class="v ${profitable ? "ratio-pos" : "ratio-neg"}">${fmt.pct(sStar)}${headroom != null ? ` <span class="hint">(${headroom.toFixed(2)}× σ)</span>` : ""}</div></div>`
-      : "";
-  const optHtml =
-    ee != null
-      ? `<div class="bars-title" title="Expected net edge running the pool as a concentrated position at the ${kLabel} band: feeAPR·p (pool yield, NOT amplified by concentration) − C·(σ²/8)·p (concentration sharpens only the IL term) − exit cost, where p≈${pPct}% is a time-in-range proxy. Bounded by feeAPR. An estimate, not a guaranteed return.">Expected net edge @ ${kLabel} band (≈${pPct}% in range)</div>
-       <div class="metric-grid">
-         <div class="metric"><div class="k">Expected net edge</div><div class="v ${ee >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(ee)}</div></div>
-         ${starRow}
-       </div>`
-      : "";
 
   const verdictText = {
     attractive:
@@ -1020,15 +988,14 @@ function renderDetail(p) {
 
     <div class="metric-grid">
       <div class="metric"><div class="k">Fee APR</div><div class="v" title="Pool-wide APR: ${fmt.pct(a.feeApr)}">${fmt.pct(a.positionFeeApr || a.feeApr)}</div></div>
-      <div class="metric"><div class="k">Fee / Vol ratio</div><div class="v ${a.feeYieldRatio >= 1 ? "ratio-pos" : "ratio-neg"}">${fmt.ratio(a.feeYieldRatio)}</div></div>
-      <div class="metric"><div class="k">Net edge APR</div><div class="v ${a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.netEdgeApr)}</div></div>
+      <div class="metric"><div class="k" title="Volatility headroom = breakeven σ / realized σ = √(8·feeAPR)/σ. Above 1× means the pool's fees overpay for the realized volatility. It is the √ of the old fee/vol APR ratio.">Vol headroom</div><div class="v ${(headroom || 0) >= 1 ? "ratio-pos" : "ratio-neg"}">${headroom == null ? "—" : headroom.toFixed(2) + "×"}</div></div>
+      <div class="metric"><div class="k" title="Full-range net edge = feeAPR − σ²/8, the APR-space attractiveness magnitude.">Net edge APR</div><div class="v ${a.netEdgeApr >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(a.netEdgeApr)}</div></div>
       <div class="metric"><div class="k">LVR cost (σ²⁄8)</div><div class="v">${fmt.pct(a.lvrCost)}</div></div>
     </div>
 
     ${bandsHtml}
-    ${optHtml}
 
-    <div class="bars-title">Volatility comparison (annualized)</div>
+    <div class="bars-title" title="Breakeven σ = √(8·feeAPR) is the concentration-invariant (full-range) breakeven — OPTIMISTIC, since the pool's real on-chain concentration would lower it, and it counts swap fees only (excludes farm/gauge incentives like AERO).">Volatility comparison (annualized)</div>
     <div class="bars">
       ${vols
         .map(

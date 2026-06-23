@@ -23,42 +23,11 @@ func TestConcentrationFactor(t *testing.T) {
 	}
 }
 
-// TestBoundaryLossDerivation cross-checks the closed-form boundaryLoss against a
-// direct value computation: a v3 position centred at p, valued at the upper edge
-// (fully one-sided), versus holding the centred inventory to that edge.
-func TestBoundaryLossDerivation(t *testing.T) {
-	for _, delta := range []float64{0.05, 0.2, 0.5, 1.0} {
-		const (
-			p = 2000.0
-			L = 1.0e6
-		)
-		sp := math.Sqrt(p)
-		spa := math.Sqrt(p * math.Exp(-delta)) // sqrt(lower)
-		spb := math.Sqrt(p * math.Exp(delta))  // sqrt(upper)
-		pb := p * math.Exp(delta)
-
-		// Centred inventory (price = p, in range).
-		x0 := L * (spb - sp) / (sp * spb) // token0
-		y0 := L * (sp - spa)              // token1
-		// LP value at the upper edge: position is fully token1.
-		lpEnd := L * (spb - spa)
-		// HODL value at the upper edge (value of the centred inventory).
-		hodl := x0*pb + y0
-		loss := 1 - lpEnd/hodl
-
-		if got := boundaryLoss(delta); math.Abs(got-loss) > 1e-9 {
-			t.Fatalf("delta=%v: boundaryLoss=%.10f, direct=%.10f", delta, got, loss)
-		}
-	}
-	// Monotonic increasing in width.
-	if !(boundaryLoss(0.1) < boundaryLoss(0.5)) {
-		t.Fatal("boundaryLoss should increase with width")
-	}
-}
-
-// TestSameWidthInvariant is the guard against the headline trap: at any given
-// width both fee yield and LVR are amplified by the SAME C, so their in-range
-// ratio is invariant to the width and equals the full-range ratio.
+// TestSameWidthInvariant is the guard for the core math correction: at any given
+// width both the fee yield and the LVR are amplified by the SAME C, so their
+// in-range ratio is invariant to the width and equals the full-range ratio.
+// Because that ratio is C-invariant, so is the breakeven volatility — the
+// position's own width cancels.
 func TestSameWidthInvariant(t *testing.T) {
 	const (
 		feeAPR = 0.30
@@ -73,7 +42,7 @@ func TestSameWidthInvariant(t *testing.T) {
 	}
 }
 
-// TestContainment pins the time-in-range proxy p at k=1 and k=2.
+// TestContainment pins the time-in-range containment confidence p at k=1 and k=2.
 func TestContainment(t *testing.T) {
 	if p := Containment(1); math.Abs(p-0.6826894921) > 1e-9 {
 		t.Fatalf("p(k=1) = %.10f, want ≈0.6827", p)
@@ -83,137 +52,103 @@ func TestContainment(t *testing.T) {
 	}
 }
 
-// TestExpectedBandEdgeFeeTermHasNoC is the central correction: the fee term is
-// feeAPR*p with NO concentration factor, even when C is large. The IL term keeps
-// C. Switching k changes both delta and p.
-func TestExpectedBandEdgeFeeTermHasNoC(t *testing.T) {
-	// Small sigma -> tight band -> large C, the regime that used to blow up.
-	in := BandEdgeInput{FeeAPR: 0.30, Sigma: 0.05, K: 1, HorizonDays: 1, RebalanceCost: 0.0005}
-	r1 := ExpectedBandEdge(in)
-
-	if !(r1.ConcentrationC > 100) {
-		t.Fatalf("expected a large C for this regime, got %.3f", r1.ConcentrationC)
-	}
-	// Fee term must equal feeAPR*p exactly — C must NOT appear.
-	wantFee := in.FeeAPR * Containment(1)
-	if math.Abs(r1.ExpectedFeeAPR-wantFee) > 1e-12 {
-		t.Fatalf("fee term = %.12f, want feeAPR*p = %.12f (no C)", r1.ExpectedFeeAPR, wantFee)
-	}
-	// Sanity: the (wrong) C-amplified value would be hundreds of % — confirm we
-	// are nowhere near it.
-	if r1.ExpectedFeeAPR > in.FeeAPR {
-		t.Fatalf("fee term %.4f exceeds feeAPR %.4f — C leaked in", r1.ExpectedFeeAPR, in.FeeAPR)
-	}
-	// IL term keeps C exactly.
-	wantLVR := ConcentrationFactor(r1.Delta) * LVRCost(in.Sigma) * Containment(1)
-	if math.Abs(r1.ExpectedLVRAPR-wantLVR) > 1e-12 {
-		t.Fatalf("IL term = %.12f, want C*(σ²/8)*p = %.12f", r1.ExpectedLVRAPR, wantLVR)
-	}
-	if math.Abs(r1.NetEdgeAPR-(r1.ExpectedFeeAPR-r1.ExpectedLVRAPR-r1.ExitCostAPR)) > 1e-12 {
-		t.Fatal("net edge != fee - lvr - exit")
-	}
-
-	in.K = 2
-	r2 := ExpectedBandEdge(in)
-	if math.Abs(r2.Delta-2*r1.Delta) > 1e-12 {
-		t.Fatalf("delta(k=2)=%.6f, want 2*delta(k=1)=%.6f", r2.Delta, 2*r1.Delta)
-	}
-	if !(r2.Containment > r1.Containment) {
-		t.Fatalf("p(k=2)=%.4f should exceed p(k=1)=%.4f", r2.Containment, r1.Containment)
-	}
-	// Still no C at k=2.
-	if math.Abs(r2.ExpectedFeeAPR-in.FeeAPR*Containment(2)) > 1e-12 {
-		t.Fatalf("k=2 fee term = %.12f, want feeAPR*p", r2.ExpectedFeeAPR)
+// TestBreakevenSigma is the corrected, concentration-invariant breakeven: it is
+// sqrt(8*feeAPR) for any pool, independent of any band width, and equals the
+// fee-implied volatility to a tight tolerance.
+func TestBreakevenSigma(t *testing.T) {
+	for _, fee := range []float64{0.0, 0.01, 0.1, 0.3, 1.0} {
+		got := BreakevenSigma(fee)
+		want := math.Sqrt(8 * fee)
+		if math.Abs(got-want) > 1e-12 {
+			t.Fatalf("BreakevenSigma(%v) = %.12f, want sqrt(8*fee) = %.12f", fee, got, want)
+		}
+		// Equals the fee-implied sigma exactly — they are the same quantity.
+		if math.Abs(got-FeeImpliedVolatility(fee)) > 1e-12 {
+			t.Fatalf("BreakevenSigma(%v) = %.12f != FeeImpliedVolatility = %.12f", fee, got, FeeImpliedVolatility(fee))
+		}
 	}
 }
 
-// TestExpectedBandEdgeBoundedByFeeAPR is the headline boundedness invariant:
-// netEdge <= feeAPR for ANY pool, including a stable/stable pool with very small
-// sigma (which used to explode to hundreds of thousands of %). With costs off, a
-// tiny-sigma pool's edge approaches feeAPR*p — close to feeAPR, not above it.
-func TestExpectedBandEdgeBoundedByFeeAPR(t *testing.T) {
-	feeAPRs := []float64{0.01, 0.05, 0.20, 0.50, 1.0}
-	sigmas := []float64{1e-4, 0.01, 0.05, 0.2, 0.6, 1.2, 2.0}
-	ks := []float64{1, 2}
-	Ts := []float64{0.5, 1, 7}
-	for _, fee := range feeAPRs {
-		for _, sig := range sigmas {
-			for _, k := range ks {
-				for _, T := range Ts {
-					r := ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: sig, K: k, HorizonDays: T, RebalanceCost: 0.0005})
-					if math.IsNaN(r.NetEdgeAPR) || math.IsInf(r.NetEdgeAPR, 0) {
-						t.Fatalf("non-finite edge for fee=%v sig=%v k=%v T=%v", fee, sig, k, T)
-					}
-					// THE invariant: never above feeAPR (tiny epsilon for float slack).
-					if r.NetEdgeAPR > fee+1e-12 {
-						t.Fatalf("edge %.6f exceeds feeAPR %.6f (fee=%v sig=%v k=%v T=%v)", r.NetEdgeAPR, fee, fee, sig, k, T)
-					}
+// TestVolHeadroom checks the volatility-space attractiveness ratio against a
+// hand computation and against the square root of the old fee/vol APR ratio,
+// and that a stable/stable low-vol pool yields a large but finite headroom.
+func TestVolHeadroom(t *testing.T) {
+	const (
+		feeAPR = 0.18
+		sigma  = 0.42
+	)
+	got := VolHeadroom(feeAPR, sigma)
+
+	// Hand-computed: sqrt(8*feeAPR)/sigma = breakeven sigma / realized sigma.
+	want := math.Sqrt(8*feeAPR) / sigma
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("VolHeadroom = %.12f, want sqrt(8*fee)/sigma = %.12f", got, want)
+	}
+	// Equals breakeven (fee-implied) sigma divided by realized sigma.
+	if math.Abs(got-FeeImpliedVolatility(feeAPR)/sigma) > 1e-12 {
+		t.Fatalf("VolHeadroom != feeImplied/realized")
+	}
+	// Equals the SQUARE ROOT of the old fee/vol APR ratio feeAPR/(sigma^2/8).
+	oldRatio := feeAPR / LVRCost(sigma)
+	if math.Abs(got-math.Sqrt(oldRatio)) > 1e-12 {
+		t.Fatalf("VolHeadroom %.12f != sqrt(old fee/vol ratio) %.12f", got, math.Sqrt(oldRatio))
+	}
+
+	// Stable/stable, very low realized vol: large but finite, no blow-up.
+	h := VolHeadroom(0.30, 1e-4)
+	if math.IsNaN(h) || math.IsInf(h, 0) {
+		t.Fatalf("low-vol headroom not finite: %v", h)
+	}
+	if !(h > 100) {
+		t.Fatalf("low-vol headroom should be large, got %v", h)
+	}
+	// No volatility signal (or no fees): 0, never NaN/Inf.
+	if VolHeadroom(0.30, 0) != 0 {
+		t.Fatalf("zero realized vol should give 0 headroom, got %v", VolHeadroom(0.30, 0))
+	}
+	if VolHeadroom(0, 0.5) != 0 {
+		t.Fatalf("zero fees should give 0 headroom, got %v", VolHeadroom(0, 0.5))
+	}
+}
+
+// TestExpectedTimeInRange checks the closed form k^2*T (days) for k=1 and k=2
+// over a couple of horizons, and that it is invariant to sigma — the underlying
+// first-passage mean delta^2/sigma^2 is the same for any sigma because the band
+// delta = k*sigma*sqrt(T/365) is itself sized by sigma.
+func TestExpectedTimeInRange(t *testing.T) {
+	cases := []struct{ k, T, want float64 }{
+		{1, 1, 1}, {1, 7, 7}, {1, 0.5, 0.5},
+		{2, 1, 4}, {2, 7, 28}, {2, 3, 12},
+	}
+	for _, c := range cases {
+		if got := ExpectedTimeInRangeDays(c.k, c.T); math.Abs(got-c.want) > 1e-12 {
+			t.Fatalf("ExpectedTimeInRangeDays(k=%v,T=%v) = %v, want k^2*T = %v", c.k, c.T, got, c.want)
+		}
+	}
+
+	// Sigma-invariance: the raw first-passage mean (delta^2/sigma^2 in years,
+	// converted to days) equals k^2*T for ANY sigma at fixed k and T.
+	for _, k := range []float64{1, 2} {
+		for _, T := range []float64{1, 7} {
+			want := ExpectedTimeInRangeDays(k, T)
+			var prev float64
+			for i, sigma := range []float64{0.05, 0.3, 0.9, 2.0} {
+				delta := k * sigma * math.Sqrt(T/365.0)
+				days := (delta * delta / (sigma * sigma)) * 365.0 // first-passage mean, days
+				if math.Abs(days-want) > 1e-9 {
+					t.Fatalf("first-passage days=%v != k^2*T=%v (k=%v T=%v sigma=%v)", days, want, k, T, sigma)
 				}
+				if i > 0 && math.Abs(days-prev) > 1e-9 {
+					t.Fatalf("time-in-range varied with sigma: %v vs %v (k=%v T=%v)", days, prev, k, T)
+				}
+				prev = days
 			}
 		}
 	}
 
-	// Stable/stable, very small sigma, costs off: edge -> feeAPR*p, i.e. close to
-	// feeAPR rather than orders of magnitude above it.
-	const fee = 0.30
-	st := ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: 1e-4, K: 1, HorizonDays: 1, RebalanceCost: 0})
-	want := fee * Containment(1)
-	if math.Abs(st.NetEdgeAPR-want) > 1e-3 {
-		t.Fatalf("tiny-sigma edge = %.6f, want ≈ feeAPR*p = %.6f", st.NetEdgeAPR, want)
-	}
-	if st.NetEdgeAPR > fee {
-		t.Fatalf("tiny-sigma edge %.6f exceeds feeAPR %.6f", st.NetEdgeAPR, fee)
-	}
-}
-
-// TestExpectedBandEdgeILReducesEdge confirms the C-amplified IL term meaningfully
-// reduces the edge for a volatile/volatile pool, by an amount that grows with
-// sigma.
-func TestExpectedBandEdgeILReducesEdge(t *testing.T) {
-	const fee = 0.40
-	mk := func(sig float64) BandEdgeResult {
-		return ExpectedBandEdge(BandEdgeInput{FeeAPR: fee, Sigma: sig, K: 1, HorizonDays: 1, RebalanceCost: 0})
-	}
-	lo := mk(0.3)
-	hi := mk(0.9)
-	// IL term is a real haircut below the fee term.
-	if !(lo.ExpectedLVRAPR > 0) || !(lo.ExpectedFeeAPR-lo.ExpectedLVRAPR < lo.ExpectedFeeAPR) {
-		t.Fatalf("IL term should reduce the edge, got LVR=%.6f", lo.ExpectedLVRAPR)
-	}
-	// Higher sigma -> larger IL haircut.
-	if !(hi.ExpectedLVRAPR > lo.ExpectedLVRAPR) {
-		t.Fatalf("IL haircut should grow with sigma: lo=%.6f hi=%.6f", lo.ExpectedLVRAPR, hi.ExpectedLVRAPR)
-	}
-}
-
-// TestBreakevenSigma checks the concentration-aware breakeven volatility: it
-// reduces to sqrt(8*feeAPR) at full range (C->1) and is strictly lower for a
-// tighter (higher-C) band.
-func TestBreakevenSigma(t *testing.T) {
-	const fee = 0.10
-	full := FeeImpliedVolatility(fee) // sqrt(8*feeAPR), the C=1 reference
-	// Large delta => C ≈ 1 => sigma* ≈ sqrt(8*feeAPR).
-	wide := BreakevenSigma(fee, 40)
-	if math.Abs(wide-full) > 1e-6 {
-		t.Fatalf("breakeven at full range = %.9f, want %.9f", wide, full)
-	}
-	// Tighter band (smaller delta, larger C) => strictly lower sigma*.
-	tight := BreakevenSigma(fee, 0.05)
-	if !(tight < full) {
-		t.Fatalf("tighter-band breakeven %.6f should be < full-range %.6f", tight, full)
-	}
-	// And it must match sqrt(8*feeAPR/C) exactly.
-	wantTight := math.Sqrt(8 * fee / ConcentrationFactor(0.05))
-	if math.Abs(tight-wantTight) > 1e-12 {
-		t.Fatalf("breakeven = %.12f, want sqrt(8*fee/C) = %.12f", tight, wantTight)
-	}
-}
-
-// TestExpectedBandEdgeFlatSeries guards the degenerate zero-sigma case.
-func TestExpectedBandEdgeFlatSeries(t *testing.T) {
-	r := ExpectedBandEdge(BandEdgeInput{FeeAPR: 0.1, Sigma: 0, K: 1, HorizonDays: 1})
-	if math.IsNaN(r.NetEdgeAPR) || math.IsInf(r.NetEdgeAPR, 0) {
-		t.Fatalf("flat-series edge not finite: %v", r.NetEdgeAPR)
+	// Degenerate guards.
+	if ExpectedTimeInRangeDays(0, 1) != 0 || ExpectedTimeInRangeDays(1, 0) != 0 {
+		t.Fatal("non-positive k or T should give 0")
 	}
 }
 
@@ -232,5 +167,66 @@ func TestAnalyzeRegressionNoBars(t *testing.T) {
 	}
 	if res.RealizedVol != RealizedVolatility(closes, 8760) {
 		t.Fatal("top-level realized vol changed")
+	}
+}
+
+// TestMethodsHeadroomAndTimeInRange checks that buildMethods exposes the new
+// honest readouts: headroom = breakeven sigma / realized sigma per method, and
+// expected time in range = k^2*T (sigma-independent) at the default horizon.
+func TestMethodsHeadroomAndTimeInRange(t *testing.T) {
+	// Two synthetic price paths with clearly different realized vols.
+	mk := func(step float64) []OHLCV {
+		bars := make([]OHLCV, 0, 400)
+		price := 2000.0
+		up := true
+		for i := 0; i < 400; i++ {
+			if up {
+				price *= 1 + step
+			} else {
+				price *= 1 - step
+			}
+			up = !up
+			o := price
+			c := price
+			bars = append(bars, OHLCV{Open: o, High: price * (1 + step/2), Low: price * (1 - step/2), Close: c, Volume: 1000})
+		}
+		return bars
+	}
+	lowVol := Analyze(Input{FeeTier: 0.003, TVLUSD: 5_000_000, Volume24hUSD: 8_000_000, PeriodsPerYear: 8760, Bars: mk(0.001)})
+	highVol := Analyze(Input{FeeTier: 0.003, TVLUSD: 5_000_000, Volume24hUSD: 8_000_000, PeriodsPerYear: 8760, Bars: mk(0.02)})
+
+	for name, res := range map[string]Result{"low": lowVol, "high": highVol} {
+		for m, mr := range res.Methods {
+			if !mr.OK {
+				continue
+			}
+			// Headroom is exactly breakeven/realized.
+			want := mr.FeeImpliedVol / mr.RealizedVol
+			if math.Abs(mr.VolHeadroom-want) > 1e-12 {
+				t.Fatalf("%s/%s headroom=%v want %v", name, m, mr.VolHeadroom, want)
+			}
+			// Time in range = k^2 * horizon, independent of sigma.
+			if math.Abs(mr.ExpTimeInRange1-mr.HorizonDays) > 1e-12 {
+				t.Fatalf("%s/%s timeInRange1=%v want T=%v", name, m, mr.ExpTimeInRange1, mr.HorizonDays)
+			}
+			if math.Abs(mr.ExpTimeInRange2-4*mr.HorizonDays) > 1e-12 {
+				t.Fatalf("%s/%s timeInRange2=%v want 4T=%v", name, m, mr.ExpTimeInRange2, 4*mr.HorizonDays)
+			}
+		}
+	}
+
+	// Same k and horizon => identical time-in-range across two different sigmas.
+	for m := range lowVol.Methods {
+		l, h := lowVol.Methods[m], highVol.Methods[m]
+		if !l.OK || !h.OK {
+			continue
+		}
+		if l.RealizedVol == h.RealizedVol {
+			continue // need genuinely different sigmas to make the point
+		}
+		if l.ExpTimeInRange1 != h.ExpTimeInRange1 || l.ExpTimeInRange2 != h.ExpTimeInRange2 {
+			t.Fatalf("%s time-in-range varied with sigma: low(%v,%v) high(%v,%v)", m,
+				l.ExpTimeInRange1, l.ExpTimeInRange2, h.ExpTimeInRange1, h.ExpTimeInRange2)
+		}
 	}
 }

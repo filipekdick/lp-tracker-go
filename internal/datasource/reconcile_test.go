@@ -19,7 +19,7 @@ import (
 //   - realized sigma: the GBM volatility the fixture was generated with (0.55),
 //     within a tolerance set by sampling error (336 bars => SE ≈ 0.55/sqrt(672)
 //     ≈ 0.021; we allow 0.06, ~3 SE), plus an exact golden for regression.
-//   - optimal width & net edge: present and finite.
+//   - breakeven sigma, headroom, net edge & time in range: present and finite.
 func TestLiveReconciliationFixture(t *testing.T) {
 	poolJSON := mustRead(t, "testdata/gecko_pool_weth_usdc.json")
 	ohlcvJSON := mustRead(t, "testdata/gecko_ohlcv_weth_usdc.json")
@@ -65,22 +65,27 @@ func TestLiveReconciliationFixture(t *testing.T) {
 		if !ok || !mr.OK {
 			t.Fatalf("method %s missing/not-ok", m)
 		}
-		t.Logf("%s: sigma=%.6f edge1=%.6f edge2=%.6f", m, mr.RealizedVol, mr.ExpEdge1.NetEdgeAPR, mr.ExpEdge2.NetEdgeAPR)
+		t.Logf("%s: sigma=%.6f netEdge=%.6f headroom=%.6f tir1=%.3f tir2=%.3f", m,
+			mr.RealizedVol, mr.NetEdgeAPR, mr.VolHeadroom, mr.ExpTimeInRange1, mr.ExpTimeInRange2)
 		if math.Abs(mr.RealizedVol-genSigma) > volTol {
 			t.Fatalf("%s sigma = %.4f, want %.2f ± %.2f", m, mr.RealizedVol, genSigma, volTol)
 		}
-		for _, e := range []analyzer.BandEdgeResult{mr.ExpEdge1, mr.ExpEdge2} {
-			if math.IsNaN(e.NetEdgeAPR) || math.IsInf(e.NetEdgeAPR, 0) {
-				t.Fatalf("%s expected edge (k=%v) not finite: %v", m, e.K, e.NetEdgeAPR)
-			}
-			// Boundedness invariant (the corrected formula): edge <= feeAPR,
-			// replacing the previously exploded value.
-			if e.NetEdgeAPR > res.FeeAPR+1e-12 {
-				t.Fatalf("%s expected edge (k=%v) %.6f exceeds feeAPR %.6f", m, e.K, e.NetEdgeAPR, res.FeeAPR)
-			}
-			if e.Containment <= 0 || e.Containment >= 1 {
-				t.Fatalf("%s containment (k=%v) out of (0,1): %v", m, e.K, e.Containment)
-			}
+		// Breakeven (fee-implied) sigma is the concentration-invariant sqrt(8*feeAPR).
+		if math.Abs(mr.FeeImpliedVol-analyzer.BreakevenSigma(res.FeeAPR)) > 1e-12 {
+			t.Fatalf("%s fee-implied sigma %.9f != breakeven sigma %.9f", m, mr.FeeImpliedVol, analyzer.BreakevenSigma(res.FeeAPR))
+		}
+		// Volatility headroom = breakeven sigma / realized sigma; finite and > 0.
+		wantHead := mr.FeeImpliedVol / mr.RealizedVol
+		if math.IsNaN(mr.VolHeadroom) || math.IsInf(mr.VolHeadroom, 0) || math.Abs(mr.VolHeadroom-wantHead) > 1e-9 {
+			t.Fatalf("%s headroom = %v, want %v", m, mr.VolHeadroom, wantHead)
+		}
+		// Full-range net edge unchanged: feeAPR - sigma^2/8.
+		if math.Abs(mr.NetEdgeAPR-(res.FeeAPR-analyzer.LVRCost(mr.RealizedVol))) > 1e-12 {
+			t.Fatalf("%s net edge regressed: %v", m, mr.NetEdgeAPR)
+		}
+		// Expected time in range is k^2*T days, sigma-independent.
+		if math.Abs(mr.ExpTimeInRange1-mr.HorizonDays) > 1e-12 || math.Abs(mr.ExpTimeInRange2-4*mr.HorizonDays) > 1e-12 {
+			t.Fatalf("%s time-in-range not k^2*T: t1=%v t2=%v (T=%v)", m, mr.ExpTimeInRange1, mr.ExpTimeInRange2, mr.HorizonDays)
 		}
 	}
 

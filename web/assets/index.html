@@ -100,14 +100,14 @@
       <button class="chip" data-method="close14d">Close 14d</button>
       <button class="chip" data-method="gk">Garman-Klass</button>
     </div>
-    <div class="filter-group" id="horizon-filters" title="Horizon T for the ±σ containment bands and the expected-edge estimate (lognormal, scaled by √T).">
+    <div class="filter-group" id="horizon-filters" title="Horizon T (days) for the ±σ range-sizing bands and the expected time in range (k²·T), both scaled by √T / by T.">
       <span class="filter-label">range T:</span>
       <button class="chip" data-horizon="0.5">12h</button>
       <button class="chip active" data-horizon="1">1d</button>
       <button class="chip" data-horizon="3">3d</button>
       <button class="chip" data-horizon="7">7d</button>
     </div>
-    <div class="filter-group" id="k-filters" title="Band width in sigmas for the containment band and the expected-edge estimate: ±1σ ≈ 68% time in range, ±2σ ≈ 95%.">
+    <div class="filter-group" id="k-filters" title="Band width in sigmas for the range-sizing band and the expected time in range: ±1σ ≈ 68% time in range, ±2σ ≈ 95%.">
       <span class="filter-label">band:</span>
       <button class="chip active" data-k="1">±1σ</button>
       <button class="chip" data-k="2">±2σ</button>
@@ -144,11 +144,11 @@
             <th data-sort="vol" class="num">Vol 24h</th>
             <th data-sort="feeApr" class="num">Fee APR</th>
             <th data-sort="realizedVol" class="num">Realized σ</th>
-            <th data-sort="feeImpliedVol" class="num">Fee-implied σ</th>
-            <th data-sort="band" class="num" title="±kσ containment band over horizon T. Containment target, not a profit-optimal width.">Range ±kσ</th>
-            <th data-sort="netEdge" class="num">Net edge</th>
-            <th data-sort="ratio" class="num">Fee/Vol</th>
-            <th data-sort="expEdge" class="num" title="Expected net edge (APR) at the ±kσ band. The fee yield is the pool's quoted yield (NOT amplified by concentration — feeAPR already reflects the pool's concentration); concentration only sharpens the impermanent-loss estimate. Weighted by time in range (containment proxy) and bounded by feeAPR. An estimate, not a guaranteed return. Click to rank.">Exp. edge ±kσ</th>
+            <th data-sort="feeImpliedVol" class="num" title="Breakeven volatility σ_be = √(8·feeAPR), the concentration-invariant (full-range) form of the Gemini concentrated breakeven 2·√(feeAPR·w) — fees and IL share the same concentration factor, so it (and the position width w) cancels. OPTIMISTIC: the pool's real on-chain concentration would lower the true breakeven; feeAPR is swap fees only (excludes farm/gauge incentives like AERO).">Breakeven σ</th>
+            <th data-sort="band" class="num" title="±kσ range-sizing guidance: where to set the LP to stay in range ≈68% (k=1) / ≈95% (k=2) of the time over horizon T. Not an edge or a return.">LP range ±kσ</th>
+            <th data-sort="timeInRange" class="num" title="Expected time in range = k²·T days (driftless GBM, instant re-centring; σ cancels because the band is sized by σ). Informational only — an idealized mean, not a guarantee; the price can re-touch the edge several times.">Time in range</th>
+            <th data-sort="netEdge" class="num" title="Full-range net edge = feeAPR − σ²/8, the APR-space attractiveness magnitude.">Net edge</th>
+            <th data-sort="headroom" class="num" title="Volatility headroom = breakeven σ / realized σ = √(8·feeAPR)/σ. Above 1× means fees overpay for the realized volatility. It is the √ of the old fee/vol APR ratio.">Vol headroom</th>
             <th data-sort="verdict">Verdict</th>
           </tr>
         </thead>
@@ -170,9 +170,9 @@
   </main>
 
   <footer class="footer">
-    <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Fee-implied σ = √(8·feeAPR).</span>
+    <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Breakeven σ = fee-implied σ = √(8·feeAPR) (optimistic, full-range; swap fees only).</span>
   </footer>
 
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

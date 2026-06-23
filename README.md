@@ -59,7 +59,7 @@ The headline signal is the **fee/vol ratio** `feeAPR ÷ (σ_realized²/8)`:
 The math lives in [`internal/analyzer`](internal/analyzer/analyzer.go) and is
 covered by unit tests.
 
-## Volatility methods, ratio-price fix, ideal ranges, expected edge & junk filter
+## Volatility methods, ratio-price fix, ideal ranges, breakeven screen & junk filter
 
 All of the following derive from a **single OHLCV request per pool** (14 days of
 hourly bars, fetched once); the shorter windows and the range estimator are
@@ -106,58 +106,90 @@ up   = exp(+z·s) − 1        down = 1 − exp(−z·s)
 
 ≈68% (`z=1`) and ≈95% (`z=2`) containment; the up move is slightly larger in
 magnitude than the down move because price is `exp(log-price)`. **These bands are
-a containment target, not a profit-optimal width** (see Expected edge below). The
-band width `k` (±1σ / ±2σ) and horizon `T` are selectable. The tracked position
+pure range-sizing guidance — where to set the LP to stay in range ≈68% (k=1) /
+≈95% (k=2) of the time over `T` — not an edge or a return.** The band width `k`
+(±1σ / ±2σ) and horizon `T` are selectable. The tracked position
 also shows its **actual** range as notional prices, computed from
 `tickLower/tickUpper` + decimals via `internal/v3math`
 (`price = 1.0001^tick · 10^(dec0−dec1)`) — display-only, zero network/chain
 calls; within-range reads 0% at the lower tick, 100% at the upper.
 
-### Expected net edge at a fixed ±kσ band — `internal/analyzer/concentrated.go`
+### Honest breakeven screen & volatility headroom — `internal/analyzer/concentrated.go`
 
-The expected net edge of running the pool as a concentrated position at the
-**fixed ±kσ band** (the same band as above), with fee capture weighted by time
-in range:
+The fragile *expected-net-edge-at-a-band* column and its band-dependent breakeven
+`σ*(δ)` have been **removed**: they rested on a guessed rebalancing cost and on a
+subtle math error. What replaces them is a bounded, pool-data-only screen.
 
-- log half-width `δ = k·σ·√(T/365)`; concentration `C(δ) = 1/(1 − e^(−δ/2))`.
-- containment proxy `p = erf(k/√2)` (≈0.68 for k=1, ≈0.95 for k=2) — the fraction
-  of time the price is within the band.
-
-```
-expectedFee = feeAPR·p                                       ← NO concentration factor
-expectedLVR = C(δ)·(σ²/8)·p
-exitCost    = (σ²/δ²)·(rebalanceCost + boundaryLoss(δ))      boundaryLoss(δ)=s(s−1)/(s²+1), s=e^(δ/2)
-netEdge     = expectedFee − expectedLVR − exitCost
-```
-
-**The fee term has no `C`.** `feeAPR = volume·feeTier / TVL`, and TVL is the
-pool's *actual, already-concentrated* deposited capital, so `feeAPR` already is
-the yield of that concentration. Multiplying it by `C` again double-counts
-concentration — the bug this corrects (it blew up low-vol pairs to hundreds of
-thousands of %: tiny σ → tiny band → huge `C`). Concentration legitimately
-amplifies only the impermanent-loss term (and, implicitly, the exit term via the
-band width). Since `expectedLVR ≥ 0` and `exitCost ≥ 0`, this is **bounded by
-construction**: `netEdge ≤ feeAPR·p ≤ feeAPR`.
-
-**Concentration-aware breakeven volatility.** The same result read cleanly as a
-volatility:
+**The breakeven volatility is concentration-invariant.** For any position active
+at the current price, **both** the fee-yield rate and the impermanent-loss (LVR)
+rate are amplified by the **same** concentration factor `C(δ) = 1/(1 − e^(−δ/2))`.
+Their ratio — and therefore the volatility at which fees equal IL — does not
+depend on `C` at all. Setting `feeAPR·C(δ) = (σ²/8)·C(δ)`, the `C(δ)` cancels and
+the position's own width `δ` drops out, leaving the **full-range** form:
 
 ```
-σ* = √( 8·feeAPR / C(δ) )
+σ_breakeven = √(8 · feeAPR)
 ```
 
-— the realized vol at which fees exactly equal the amplified IL. With the exact
-`C(δ)`; at full range (`C → 1`) it reduces to the existing fee-implied vol
-`√(8·feeAPR)`, so it is a strict generalisation of that metric. If realized σ is
-below `σ*` the band is profitable, and `σ*/σ` is the headroom; both are shown in
-the detail panel. Computed for k=1 and k=2 per method; the dashboard column and
-detail card react to the ±kσ, horizon and σ-method toggles.
+This is the `C = 1` case of the concentrated breakeven `2·√(feeAPR·w)`: when fees
+are amplified consistently with IL, the width `w` cancels and you land here. It is
+**exactly the existing fee-implied σ** — the dashboard now presents the
+fee-implied σ column *as* the breakeven volatility, labeled as such.
 
-**Assumptions / parameters** (configurable, with defaults): horizon `T`
-(`DefaultHorizonDays` = 1 day), `rebalanceCost` (`DefaultRebalanceCost` = 5 bps),
-GBM zero drift. The reusable primitives (`ConcentrationFactor`, `boundaryLoss`,
-`BreakevenSigma`) are unit-tested in `concentrated_test.go`, and the boundedness
-invariant (`netEdge ≤ feeAPR`) is asserted across a grid of synthetic pools.
+> ⚠️ **The breakeven is OPTIMISTIC.** The *true* breakeven for the pool's actual
+> concentration is `√(8·feeAPR / C_pool)`, where `C_pool > 1` is the pool's
+> existing on-chain concentration (from active liquidity). Because `C_pool > 1`
+> the real breakeven is **lower**, so `√(8·feeAPR)` is an upper bound and the
+> verdict errs **generous**. The on-chain refinement is a separate future task
+> (no new API/RPC calls here).
+
+> ⚠️ **`feeAPR` is swap fees only.** It excludes farm/gauge incentives (e.g. AERO
+> emissions on Aerodrome), so total LP yield on incentivised pools is
+> **understated** and the screen is conservative on those pools.
+
+**Volatility headroom** is the attractiveness ratio in volatility space:
+
+```
+headroom = σ_breakeven / σ_realized = √(8·feeAPR) / σ
+```
+
+It reads as how many times the breakeven volatility exceeds the volatility that
+actually happened; **above 1× means fees are overpaying** for the realized
+volatility. It is the **square root of the old fee/vol APR ratio**
+`feeAPR/(σ²/8)` — bounded and readable. A stable/stable low-vol pool yields a
+large but finite headroom (no blow-up); the TVL/turnover junk filter remains the
+guard against absurd pools.
+
+**Full-range net edge** `feeAPR − σ²/8` is retained as the APR-space
+attractiveness magnitude, and the **verdict** is unchanged: realized σ vs.
+fee-implied (breakeven) σ, attractive when realized is comfortably below breakeven.
+
+### Expected time in range (informational) — `internal/analyzer/concentrated.go`
+
+Under driftless GBM the expected time for the centred log-price to first touch a
+band edge of log half-width `δ` is `δ²/σ²`. Substituting the band's own width
+`δ = k·σ·√(T/365)` **cancels σ**:
+
+```
+expected_time_in_range = k² · T   (days)
+```
+
+It is shown in days (or hours when under a day) and reacts to the `k` and `T`
+toggles. **It does not depend on the volatility** — σ cancels precisely because
+the band is itself sized by σ. This is **informational only**: it never feeds an
+edge or the verdict.
+
+> ⚠️ It is an **idealized mean** under driftless GBM with instant re-centring, not
+> a guarantee, and it **undercounts** how often the price touches the edge — the
+> real number of rebalances can be higher because the price can re-touch the edge
+> several times.
+
+**Assumptions / parameters**: horizon `T` (`DefaultHorizonDays` = 1 day), GBM zero
+drift. The primitives (`BreakevenSigma`, `VolHeadroom`, `ExpectedTimeInRangeDays`,
+and the `ConcentrationFactor`/`AmplifiedFeeYield`/`AmplifiedLVR` invariance
+helpers) are unit-tested in `concentrated_test.go`: the breakeven equals the
+fee-implied σ, the headroom equals `√` of the old fee/vol ratio, and the
+time-in-range equals `k²·T` and is invariant to σ.
 
 ### Junk-pool filter (scanner) — `internal/scanner`
 
