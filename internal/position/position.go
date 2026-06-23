@@ -104,6 +104,22 @@ type TrackedPosition struct {
 	OpenShorts      []binance.Position   `json:"openShorts"`
 	OpenLimitOrders []binance.LimitOrder `json:"openLimitOrders"`
 
+	// Hedge PnL ledger, cumulative USD since strategy inception, re-derived from
+	// Binance income history each poll. Signs: realized and funding are signed
+	// (funding positive = the short received funding); commissions is a positive
+	// cost that is subtracted in net PnL. HedgeIncomePartial is true when
+	// inception predates the income lookback window, so these totals are partial.
+	HedgeRealizedPnL    float64 `json:"hedgeRealizedPnl"`
+	HedgeFundingUSD     float64 `json:"hedgeFundingUsd"`
+	HedgeCommissionsUSD float64 `json:"hedgeCommissionsUsd"`
+	HedgeIncomePartial  bool    `json:"hedgeIncomePartial"`
+
+	// LP fee ledger. FeesToCollectUSD is the current uncollected fees (what a
+	// harvest realizes right now); FeesTotalUSD is the cumulative collected +
+	// uncollected since inception, which survives harvests and never resets.
+	FeesToCollectUSD float64 `json:"feesToCollectUsd"`
+	FeesTotalUSD     float64 `json:"feesTotalUsd"`
+
 	// History
 	InitialState *Snapshot  `json:"initialState"`
 	History      []Snapshot `json:"history"`
@@ -121,9 +137,17 @@ type Snapshot struct {
 	Amount0   float64   `json:"amount0"`
 	Amount1   float64   `json:"amount1"`
 	ValueUSD  float64   `json:"valueUsd"`
-	HedgePnL  float64   `json:"hedgePnl"`
-	FeesUSD   float64   `json:"feesUsd"`
-	NetPnL    float64   `json:"netPnl"`
+	// HedgePnL is the open short's unrealized PnL (the live, resettable part).
+	HedgePnL float64 `json:"hedgePnl"`
+	// HedgeRealizedPnL, HedgeFundingUSD and HedgeCommissionsUSD are cumulative USD
+	// since inception (see TrackedPosition for signs).
+	HedgeRealizedPnL    float64 `json:"hedgeRealizedPnl"`
+	HedgeFundingUSD     float64 `json:"hedgeFundingUsd"`
+	HedgeCommissionsUSD float64 `json:"hedgeCommissionsUsd"`
+	// FeesUSD is the cumulative LP fees (collected + uncollected) in USD — the
+	// value used by the net PnL identity and the chart, so it survives harvests.
+	FeesUSD float64 `json:"feesUsd"`
+	NetPnL  float64 `json:"netPnl"`
 }
 
 // Tracker produces the current state of a tracked position.

@@ -239,6 +239,76 @@ hedge read) and a **demo** implementation. The hedge is **read/advisory by
 default** (`HEDGE_DRY_RUN=true`); actually placing orders stays in the
 standalone `cmd/hedge` tool.
 
+### Hedge PnL ledger & strategy net PnL identity
+
+The open short's **unrealized** PnL alone is not the hedge's contribution: it
+loses the **realized** PnL banked each time the hedge is rebalanced (a closed
+leg leaves the open position) and ignores **funding** and **commissions**. All
+three come from one Binance USDⓈ-M futures endpoint — the income / transaction
+history (`/fapi/v1/income`, via go-binance `NewGetIncomeHistoryService`) —
+distinguished by `incomeType` (`REALIZED_PNL`, `FUNDING_FEE`, `COMMISSION`).
+`internal/binance` fetches it for the tracked perp symbols from inception to
+now, paginating the ~1000-row page limit, and aggregates three running USD sums.
+USDT and USDC income are both treated as **≈1 USD**, so the ledger is in USD and
+stays correct after a switch from USDT- to USDC-margined futures.
+
+The **complete hedge PnL** is `realized + unrealized`. Realized (closed legs) and
+unrealized (open position) are **disjoint** — a leg's PnL is unrealized while
+open and only becomes realized once closed, at which point it leaves the
+unrealized figure — so they add without double-counting.
+
+The **strategy net PnL identity** (each term measured since inception) is:
+
+```
+net PnL = LP value change since inception   (+)
+        + hedge unrealized                  (+)  open short PnL
+        + hedge realized                    (+)  closed legs, signed
+        + funding                           (+)  signed: + when the short RECEIVES
+        − commissions                       (−)  a paid cost, stored positive
+        + LP fees                           (+)  cumulative: collected + uncollected
+```
+
+The **LP–hedge mismatch** line is net PnL minus the LP-fees term, i.e. LP value
+change plus the complete hedge PnL plus funding minus commissions — the true
+impermanent-loss residual, no longer the accounting gap that ignored the
+realized PnL banked out of the open short.
+
+### LP fee ledger (collected + uncollected)
+
+A harvest zeroes the position's uncollected fees, so using only the uncollected
+balance makes the fee total collapse on every collect. The fee ledger mirrors
+the hedge's realized+unrealized split: it banks a **collected** total and keeps
+the **uncollected** live, so the cumulative `collected + uncollected` is
+continuous across a harvest (one part drops, the other rises by the same amount).
+
+**Harvest detection uses TOKEN UNITS, not USD.** Uncollected fees in token units
+only ever accrue upward between reads and can only fall on a collect, so any
+**decrease in a leg's uncollected token amount is a harvest**; on one we bank the
+**previous** uncollected token amount and resume accruing from the current
+amount. A USD-value threshold would be wrong: in a token/token pool the USD value
+of fees can fall just because the token price fell, which would be a false
+harvest. The fee card shows two distinct numbers — **Fees to collect** (current
+uncollected, what a harvest realizes now) and **Total fees since start**
+(cumulative, survives harvests).
+
+### Persistence & accuracy caveats (documented, not solved here)
+
+- **In-memory reset on restart.** Both the collected-fees total and the
+  inception baseline live in memory and reset on process restart, like the rest
+  of the strategy state. Until persistence exists, a restart loses the collected
+  portion. The hedge ledger is re-derived from Binance income history on every
+  poll (the endpoint is the source of truth and re-fetching is robust), so it
+  recovers on restart **as long as inception falls inside the income lookback
+  window** (`binance.IncomeLookback`, ~90d). When inception predates that window
+  the ledger is flagged **partial**. Persisting a running total across restarts
+  is a separate later task.
+- **Lifetime collected fees.** The exact source of truth for lifetime collected
+  fees is the on-chain `Collect` events for the position; re-deriving from those,
+  or persisting the running total, is the robust later upgrade.
+- **Harvest gap.** Fees that accrue between the last read and the collect are
+  approximated by banking the last-seen uncollected amount; the gap error is
+  bounded by one polling interval.
+
 ## Architecture
 
 ```

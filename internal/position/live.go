@@ -40,6 +40,7 @@ type LiveTracker struct {
 	mu           sync.Mutex
 	initialState *Snapshot
 	history      []Snapshot
+	feeLedger    FeeLedger // banks collected LP fees across harvests (token units)
 }
 
 // NewLiveTracker wires the live data sources. bn may be nil, in which case the
@@ -146,61 +147,118 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		}
 	}
 
-	// Snapshot for history
-	snap := Snapshot{
-		Timestamp: tp.UpdatedAt,
-		Price0:    0,
-		Price1:    0,
-		Amount0:   report.Amount0,
-		Amount1:   report.Amount1,
-		ValueUSD:  tp.ValueUSD,
-		HedgePnL:  0,
-		FeesUSD:   0,
-		NetPnL:    0,
+	price0, price1 := 0.0, 0.0
+	if rp.Address != "" {
+		price0 = legPrice(report.Symbol0, rp)
+		price1 = legPrice(report.Symbol1, rp)
 	}
 
-	if rp.Address != "" {
-		snap.Price0 = legPrice(report.Symbol0, rp)
-		snap.Price1 = legPrice(report.Symbol1, rp)
-		snap.FeesUSD = report.UncollectedFees0*legPrice(report.Symbol0, rp) +
-			report.UncollectedFees1*legPrice(report.Symbol1, rp)
-	}
+	// Sum of the open shorts' unrealized PnL — the live, resettable part of the
+	// hedge PnL.
+	hedgeUnrealized := 0.0
 	for _, h := range tp.Hedges {
-		snap.HedgePnL += h.UnrealizedPnL
+		hedgeUnrealized += h.UnrealizedPnL
 	}
-	snap.NetPnL = snap.HedgePnL + snap.FeesUSD // simplified PnL
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// Re-derive the cumulative hedge income ledger (realized PnL, funding,
+	// commissions) from Binance since inception. The income endpoint is the
+	// source of truth and re-fetching is robust, so we do not persist a running
+	// total — this relies on inception falling inside binance.IncomeLookback; if
+	// it predates that window the ledger comes back flagged Partial. Persisting
+	// across restarts is a separate later task.
+	var ledger binance.IncomeLedger
+	if t.bn != nil {
+		inceptionMs := snap0(t.initialState).Timestamp.UnixMilli()
+		if t.initialState == nil {
+			inceptionMs = tp.UpdatedAt.UnixMilli() // first poll: window is empty → zero ledger
+		}
+		if syms := hedgeSymbols(tp.Hedges); len(syms) > 0 {
+			if l, err := t.bn.GetHedgeIncome(ctx, syms, inceptionMs); err == nil {
+				ledger = l
+			} else {
+				log.Printf("[hedger] income history unavailable: %v", err)
+			}
+		}
+	}
+
+	// Update the LP fee ledger in TOKEN UNITS so a harvest (a leg's uncollected
+	// token amount falling) is detected without being fooled by a price-only drop
+	// in fee USD value. The cumulative total = banked collected + current
+	// uncollected, priced at current prices.
+	t.feeLedger.Update(report.UncollectedFees0, report.UncollectedFees1)
+	feesToCollect := t.feeLedger.ToCollectUSD(price0, price1)
+	feesTotal := t.feeLedger.TotalUSD(price0, price1)
+
+	// Snapshot for history.
+	snap := Snapshot{
+		Timestamp:           tp.UpdatedAt,
+		Price0:              price0,
+		Price1:              price1,
+		Amount0:             report.Amount0,
+		Amount1:             report.Amount1,
+		ValueUSD:            tp.ValueUSD,
+		HedgePnL:            hedgeUnrealized,
+		HedgeRealizedPnL:    ledger.RealizedPnL,
+		HedgeFundingUSD:     ledger.Funding,
+		HedgeCommissionsUSD: ledger.Commissions,
+		FeesUSD:             feesTotal, // cumulative collected + uncollected
+		NetPnL:              0,
+	}
+
+	// Surface the ledgers on the tracked position for the API/dashboard.
+	tp.HedgeRealizedPnL = ledger.RealizedPnL
+	tp.HedgeFundingUSD = ledger.Funding
+	tp.HedgeCommissionsUSD = ledger.Commissions
+	tp.HedgeIncomePartial = ledger.Partial
+	tp.FeesToCollectUSD = feesToCollect
+	tp.FeesTotalUSD = feesTotal
+
 	if t.initialState == nil && tp.Error == "" && rp.Address != "" {
-		// First successful scan, capture baseline
+		// First successful scan, capture baseline.
 		t.initialState = &Snapshot{
-			Timestamp: snap.Timestamp,
-			Price0:    snap.Price0,
-			Price1:    snap.Price1,
-			Amount0:   snap.Amount0,
-			Amount1:   snap.Amount1,
-			ValueUSD:  snap.ValueUSD,
-			HedgePnL:  snap.HedgePnL,
-			FeesUSD:   snap.FeesUSD,
-			NetPnL:    0, // Initial net PnL is zero
+			Timestamp:           snap.Timestamp,
+			Price0:              snap.Price0,
+			Price1:              snap.Price1,
+			Amount0:             snap.Amount0,
+			Amount1:             snap.Amount1,
+			ValueUSD:            snap.ValueUSD,
+			HedgePnL:            snap.HedgePnL,
+			HedgeRealizedPnL:    snap.HedgeRealizedPnL,
+			HedgeFundingUSD:     snap.HedgeFundingUSD,
+			HedgeCommissionsUSD: snap.HedgeCommissionsUSD,
+			FeesUSD:             snap.FeesUSD,
+			NetPnL:              0, // Initial net PnL is zero
 		}
 	}
 
 	if t.initialState != nil {
-		// Net PnL of the strategy = the *change* since tracking started in LP
-		// value + hedge PnL + accrued fees. Each leg is measured relative to the
-		// baseline so the series starts at zero; using the absolute hedge PnL or
-		// fee balance here would offset the whole curve by whatever those were
-		// at inception.
-		lpChange := snap.ValueUSD - t.initialState.ValueUSD
-		hedgeChange := snap.HedgePnL - t.initialState.HedgePnL
-		feesChange := snap.FeesUSD - t.initialState.FeesUSD
-		snap.NetPnL = lpChange + hedgeChange + feesChange
+		// Strategy net PnL = the *change* since inception, summing every term with
+		// its documented sign (see PnLComponents.NetPnL):
+		//   + LP value change   (current LP value − inception LP value)
+		//   + hedge unrealized  (open short PnL, baselined so the curve starts at 0)
+		//   + hedge realized    (cumulative since inception — already ~0 at start
+		//                        because the income window opens at inception)
+		//   + funding           (cumulative, signed: + when the short receives)
+		//   − commissions       (cumulative paid cost)
+		//   + LP fees           (cumulative collected + uncollected, baselined)
+		// The hedge unrealized and LP fees are baselined against inception; the
+		// income terms are inception-relative by construction (the income fetch
+		// starts at inception), so they are not baselined again.
+		comps := PnLComponents{
+			LPChange:        snap.ValueUSD - t.initialState.ValueUSD,
+			HedgeUnrealized: snap.HedgePnL - t.initialState.HedgePnL,
+			HedgeRealized:   ledger.RealizedPnL,
+			Funding:         ledger.Funding,
+			Commissions:     ledger.Commissions,
+			LPFees:          snap.FeesUSD - t.initialState.FeesUSD,
+		}
+		snap.NetPnL = comps.NetPnL()
 
 		elapsed := snap.Timestamp.Sub(t.initialState.Timestamp)
-		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(feesChange, tp.ValueUSD, elapsed)
+		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(comps.LPFees, tp.ValueUSD, elapsed)
 
 		t.history = append(t.history, snap)
 
@@ -214,6 +272,30 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	}
 
 	return tp, nil
+}
+
+// snap0 returns a zero-value Snapshot for a nil pointer, so callers can read a
+// field without a nil check.
+func snap0(s *Snapshot) Snapshot {
+	if s == nil {
+		return Snapshot{}
+	}
+	return *s
+}
+
+// hedgeSymbols collects the distinct perp symbols of the available hedges, for
+// the income-history fetch.
+func hedgeSymbols(hedges []Hedge) []string {
+	seen := map[string]bool{}
+	var syms []string
+	for _, h := range hedges {
+		if h.Symbol == "" || seen[h.Symbol] {
+			continue
+		}
+		seen[h.Symbol] = true
+		syms = append(syms, h.Symbol)
+	}
+	return syms
 }
 
 // hedges determines the perp shorts that offset the position's volatile legs and

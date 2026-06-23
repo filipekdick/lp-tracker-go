@@ -117,6 +117,25 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 
 	tp.fillRangePrices()
 
+	// Synthetic hedge income ledger (cumulative USD since inception) so the new
+	// realized / funding / commission fields render with no network. Signs match
+	// the live path: realized and funding signed, commissions a positive cost.
+	realized := 35 + rng.Float64()*20 // banked at past rebalances
+	funding := 8 + rng.Float64()*6    // net funding the short received (positive)
+	commissions := 4 + rng.Float64()*3
+	tp.HedgeRealizedPnL = realized
+	tp.HedgeFundingUSD = funding
+	tp.HedgeCommissionsUSD = commissions
+	tp.HedgeIncomePartial = false
+
+	// Synthetic LP fee ledger. The current uncollected fees are "fees to collect";
+	// the cumulative total adds a banked "collected" amount from a past harvest,
+	// so the two fields differ — exactly what a real harvest produces.
+	uncollectedUSD := tp.UncollectedFees0*mark + tp.UncollectedFees1
+	collectedUSD := 50 + rng.Float64()*40 // banked by an earlier harvest
+	tp.FeesToCollectUSD = uncollectedUSD
+	tp.FeesTotalUSD = collectedUSD + uncollectedUSD
+
 	// Synthetic open futures positions so the dashboard's "Open futures shorts"
 	// table has rows to show. The ETH leg mirrors the hedge above; the others
 	// give the table some variety.
@@ -125,7 +144,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	// Synthetic strategy history so the Net-PnL/fees graph has a timeline to
 	// draw before any live scans land. Live tracking builds this incrementally;
 	// here we backfill a believable few hours in one shot.
-	tp.InitialState, tp.History = demoHistory(rng, closes, wethAmount, usdcAmount, current, entryPrice)
+	tp.InitialState, tp.History = demoHistory(rng, closes, wethAmount, usdcAmount, current, entryPrice,
+		realized, funding, commissions, tp.FeesTotalUSD)
 
 	// Synthetic open limit orders so the "Open limit orders" table and its
 	// Cancel button are exercisable without live credentials.
@@ -154,10 +174,13 @@ func demoOpenShorts(rng *rand.Rand, ethShort, ethEntry, ethMark float64) []binan
 }
 
 // demoHistory backfills a few hours of strategy snapshots ending now, so the
-// graph paints a line on first load. NetPnL = LP value change + hedge PnL +
-// accrued fees, matching the live tracker's definition; the initial state is
-// the baseline (NetPnL zero).
-func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short, entry float64) (*Snapshot, []Snapshot) {
+// graph paints a line on first load. NetPnL follows the full identity (see
+// PnLComponents.NetPnL): LP value change + hedge unrealized + hedge realized +
+// funding − commissions + cumulative LP fees. The cumulative income terms and
+// fees ramp from zero at inception to their totals now, so the curve starts at
+// zero like the baseline (NetPnL zero).
+func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short, entry,
+	realizedTotal, fundingTotal, commissionsTotal, feesTotalCum float64) (*Snapshot, []Snapshot) {
 	const n = 24
 	const step = 8 * time.Minute
 	if len(closes) < n {
@@ -173,7 +196,6 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 	value0 := amt0At(0)*tail[0] + amt1At(0)
 	hedge0 := short * (entry - tail[0]) // baseline hedge PnL at inception
 
-	feesTotal := 6 + rng.Float64()*40 // USD of fees accrued over the window
 	hist := make([]Snapshot, 0, n)
 	for i := 0; i < n; i++ {
 		progress := float64(i) / float64(n-1)
@@ -181,19 +203,32 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 		amt0, amt1 := amt0At(progress), amt1At(progress)
 		value := amt0*price + amt1
 		hedgePnL := short * (entry - price) // short gains as price falls
-		fees := feesTotal * progress
-		// Net PnL is the change since inception (see live.go), so the curve
-		// starts at zero rather than at the hedge's standing PnL.
+		// Cumulative terms accrue from zero at inception to their totals now.
+		realized := realizedTotal * progress
+		funding := fundingTotal * progress
+		commissions := commissionsTotal * progress
+		feesCum := feesTotalCum * progress // cumulative collected + uncollected
+		comps := PnLComponents{
+			LPChange:        value - value0,
+			HedgeUnrealized: hedgePnL - hedge0,
+			HedgeRealized:   realized,
+			Funding:         funding,
+			Commissions:     commissions,
+			LPFees:          feesCum,
+		}
 		hist = append(hist, Snapshot{
-			Timestamp: start.Add(time.Duration(i) * step),
-			Price0:    price,
-			Price1:    1,
-			Amount0:   amt0,
-			Amount1:   amt1,
-			ValueUSD:  value,
-			HedgePnL:  hedgePnL,
-			FeesUSD:   fees,
-			NetPnL:    (value - value0) + (hedgePnL - hedge0) + fees,
+			Timestamp:           start.Add(time.Duration(i) * step),
+			Price0:              price,
+			Price1:              1,
+			Amount0:             amt0,
+			Amount1:             amt1,
+			ValueUSD:            value,
+			HedgePnL:            hedgePnL,
+			HedgeRealizedPnL:    realized,
+			HedgeFundingUSD:     funding,
+			HedgeCommissionsUSD: commissions,
+			FeesUSD:             feesCum,
+			NetPnL:              comps.NetPnL(),
 		})
 	}
 	initial := hist[0]
