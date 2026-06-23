@@ -77,23 +77,28 @@ func TestIntegrationSmokeDemo(t *testing.T) {
 			if num(t, m, "band1Up") < num(t, m, "band1Down") {
 				t.Fatalf("%s band1 up < down", key)
 			}
-			// Expected net edge at the ±1σ and ±2σ bands: present, finite, with a
-			// sane containment proxy in (0,1), and bounded by feeAPR (the corrected,
-			// no-double-counting invariant).
-			feeAPR := num(t, a, "feeApr")
-			for _, ek := range []string{"expEdge1", "expEdge2"} {
-				e, _ := m[ek].(map[string]any)
-				if e == nil {
-					t.Fatalf("%s missing %s", key, ek)
-				}
-				finite(t, e, "netEdgeApr")
-				if num(t, e, "netEdgeApr") > feeAPR+1e-9 {
-					t.Fatalf("%s %s edge %v exceeds feeAPR %v", key, ek, e["netEdgeApr"], feeAPR)
-				}
-				finite(t, e, "sigmaStar")
-				cont := num(t, e, "containment")
-				if cont <= 0 || cont >= 1 {
-					t.Fatalf("%s %s containment out of (0,1): %v", key, ek, cont)
+			// Honest, pool-data-only readouts that replaced the band-edge column.
+			// Volatility headroom = breakeven sigma / realized sigma: present,
+			// finite, non-negative.
+			finite(t, m, "volHeadroom")
+			if hr := num(t, m, "volHeadroom"); hr < 0 {
+				t.Fatalf("%s volHeadroom negative: %v", key, hr)
+			}
+			// Expected time in range = k^2*T days at the method's horizon: present,
+			// finite, and exactly T (k=1) / 4T (k=2).
+			finite(t, m, "expTimeInRange1")
+			finite(t, m, "expTimeInRange2")
+			hd := num(t, m, "horizonDays")
+			if t1 := num(t, m, "expTimeInRange1"); math.Abs(t1-hd) > 1e-9 {
+				t.Fatalf("%s expTimeInRange1 %v != horizon %v", key, t1, hd)
+			}
+			if t2 := num(t, m, "expTimeInRange2"); math.Abs(t2-4*hd) > 1e-9 {
+				t.Fatalf("%s expTimeInRange2 %v != 4*horizon %v", key, t2, 4*hd)
+			}
+			// The removed band-edge fields must be gone.
+			for _, removed := range []string{"expEdge1", "expEdge2"} {
+				if _, ok := m[removed]; ok {
+					t.Fatalf("%s still exposes removed field %s", key, removed)
 				}
 			}
 		}

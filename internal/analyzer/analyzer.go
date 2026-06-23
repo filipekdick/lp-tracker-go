@@ -41,17 +41,16 @@ type Input struct {
 
 	// Bars holds the full OHLCV history (oldest first), long enough to cover the
 	// longest volatility window (14 days). When present, Analyze computes the
-	// selectable per-method volatilities (Phase 1), range bands (Phase 2) and the
-	// concentrated-LVR optimum (Phase 3) into Result.Methods. It is derived from
-	// the same single OHLCV request that produces Closes.
+	// selectable per-method volatilities (Phase 1), range bands (Phase 2), the
+	// volatility headroom and the informational expected time in range into
+	// Result.Methods. It is derived from the same single OHLCV request that
+	// produces Closes.
 	Bars []OHLCV
 
-	// HorizonDays is the rebalance/scan horizon T used for the range bands and the
-	// concentrated-LVR optimiser. Zero falls back to DefaultHorizonDays.
+	// HorizonDays is the horizon T (days) used for the range bands and the
+	// informational expected-time-in-range readout. Zero falls back to
+	// DefaultHorizonDays.
 	HorizonDays float64
-	// RebalanceCost is the per-rebalance cost (gas + slippage) as a fraction of
-	// position value. Zero falls back to DefaultRebalanceCost.
-	RebalanceCost float64
 }
 
 // Verdict classifies how a pool's fee yield compares to its volatility cost.
