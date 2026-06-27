@@ -25,14 +25,17 @@ type poolPricer interface {
 	PoolByAddress(ctx context.Context, chain datasource.Chain, address string) (datasource.RawPool, error)
 }
 
-// LiveTracker reads a position from chain, prices its pool via GeckoTerminal,
-// pulls implied vol from Deribit and reads the matching Binance short.
+// LiveTracker reads one or more positions from chain, prices their pools via
+// GeckoTerminal, pulls implied vol from Deribit and reads/syncs the matching
+// Binance shorts. When several token IDs are tracked it sums their volatile-leg
+// exposure by asset (folding synthetics together) and hedges each asset with a
+// single short.
 type LiveTracker struct {
 	reader   poolReader
 	pricer   poolPricer
 	iv       datasource.ImpliedVolSource
 	bn       *binance.Client
-	tokenID  int64
+	tokenIDs []int64
 	chain    datasource.Chain
 	dryRun   bool
 	strategy *hedger.Strategy
@@ -40,44 +43,212 @@ type LiveTracker struct {
 	mu           sync.Mutex
 	initialState *Snapshot
 	history      []Snapshot
-	feeLedger    FeeLedger // banks collected LP fees across harvests (token units)
+	// feeLedgers banks collected LP fees across harvests per tracked position
+	// (token units), keyed by token ID, so a portfolio of positions keeps each
+	// leg's harvest accounting separate.
+	feeLedgers map[int64]*FeeLedger
 }
 
 // NewLiveTracker wires the live data sources. bn may be nil, in which case the
-// hedge is reported as advisory (target only, no live short).
+// hedge is reported as advisory (target only, no live short). tokenIDs lists
+// every LP position to track; with more than one the hedge is aggregated.
 func NewLiveTracker(
 	reader poolReader,
 	pricer poolPricer,
 	iv datasource.ImpliedVolSource,
 	bn *binance.Client,
-	tokenID int64,
+	tokenIDs []int64,
 	chain datasource.Chain,
 	dryRun bool,
 	strategy *hedger.Strategy,
 ) *LiveTracker {
 	return &LiveTracker{
-		reader:   reader,
-		pricer:   pricer,
-		iv:       iv,
-		bn:       bn,
-		tokenID:  tokenID,
-		chain:    chain,
-		dryRun:   dryRun,
-		strategy: strategy,
+		reader:     reader,
+		pricer:     pricer,
+		iv:         iv,
+		bn:         bn,
+		tokenIDs:   tokenIDs,
+		chain:      chain,
+		dryRun:     dryRun,
+		strategy:   strategy,
+		feeLedgers: map[int64]*FeeLedger{},
 	}
 }
 
 func (t *LiveTracker) Name() string { return "live" }
 
-// Track reads the current position, pool analysis and hedge state.
+// trackedLeg bundles one position's on-chain report and priced pool so the
+// aggregation, valuation and fee ledger can all reuse a single read.
+type trackedLeg struct {
+	report lp.PositionReport
+	rp     datasource.RawPool
+	priced bool
+	price0 float64
+	price1 float64
+	value  float64
+	leg    PositionLeg
+}
+
+// Track reads every tracked position, aggregates the exposure across them and
+// reports a single simplified hedge per asset.
 func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
-	report, err := t.reader.ReadPosition(t.tokenID)
-	if err != nil {
-		return TrackedPosition{}, fmt.Errorf("reading position %d: %w", t.tokenID, err)
+	if len(t.tokenIDs) == 0 {
+		return TrackedPosition{}, fmt.Errorf("no token IDs configured to track")
 	}
 
-	tp := TrackedPosition{
-		TokenID:          t.tokenID,
+	var legs []trackedLeg
+	var firstErr error
+	for _, id := range t.tokenIDs {
+		report, err := t.reader.ReadPosition(id)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("reading position %d: %w", id, err)
+			}
+			log.Printf("[tracker] reading position %d failed: %v", id, err)
+			continue
+		}
+		legs = append(legs, t.priceLeg(ctx, report))
+	}
+	// Every position failed to read: surface the first error.
+	if len(legs) == 0 {
+		return TrackedPosition{}, firstErr
+	}
+
+	tp := buildPortfolio(legs)
+	tp.Source = "live"
+	tp.UpdatedAt = time.Now()
+
+	// Aggregate exposure across all positions and build one hedge per asset.
+	tp.Exposures = aggregateExposures(tp.Positions)
+	tp.Hedges = t.hedges(ctx, tp.Exposures)
+	if len(tp.Hedges) > 0 {
+		tp.Hedge = tp.Hedges[0]
+	}
+
+	if t.bn != nil {
+		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
+			tp.OpenShorts = open
+		}
+		if orders, err := t.bn.GetAllOpenOrders(ctx); err == nil {
+			tp.OpenLimitOrders = orders
+		}
+	}
+
+	// Sum of the open shorts' unrealized PnL — the live, resettable part of the
+	// hedge PnL.
+	hedgeUnrealized := 0.0
+	for _, h := range tp.Hedges {
+		hedgeUnrealized += h.UnrealizedPnL
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Re-derive the cumulative hedge income ledger (realized PnL, funding,
+	// commissions) from Binance since inception for every aggregated perp symbol.
+	var ledger binance.IncomeLedger
+	if t.bn != nil {
+		inceptionMs := snap0(t.initialState).Timestamp.UnixMilli()
+		if t.initialState == nil {
+			inceptionMs = tp.UpdatedAt.UnixMilli() // first poll: window is empty → zero ledger
+		}
+		if syms := hedgeSymbols(tp.Hedges); len(syms) > 0 {
+			if l, err := t.bn.GetHedgeIncome(ctx, syms, inceptionMs); err == nil {
+				ledger = l
+			} else {
+				log.Printf("[hedger] income history unavailable: %v", err)
+			}
+		}
+	}
+
+	// Update the per-position LP fee ledgers in TOKEN UNITS (harvest detection)
+	// and sum across the portfolio, priced at each pool's current prices.
+	feesToCollect, feesTotal := 0.0, 0.0
+	for _, l := range legs {
+		led := t.feeLedgers[l.report.TokenID]
+		if led == nil {
+			led = &FeeLedger{}
+			t.feeLedgers[l.report.TokenID] = led
+		}
+		led.Update(l.report.UncollectedFees0, l.report.UncollectedFees1)
+		feesToCollect += led.ToCollectUSD(l.price0, l.price1)
+		feesTotal += led.TotalUSD(l.price0, l.price1)
+	}
+
+	// Snapshot for history (portfolio-level).
+	snap := Snapshot{
+		Timestamp:           tp.UpdatedAt,
+		Price0:              tp.Price0,
+		Price1:              tp.Price1,
+		Amount0:             tp.Amount0,
+		Amount1:             tp.Amount1,
+		ValueUSD:            tp.ValueUSD,
+		HedgePnL:            hedgeUnrealized,
+		HedgeRealizedPnL:    ledger.RealizedPnL,
+		HedgeFundingUSD:     ledger.Funding,
+		HedgeCommissionsUSD: ledger.Commissions,
+		FeesUSD:             feesTotal,
+		NetPnL:              0,
+	}
+
+	tp.HedgeRealizedPnL = ledger.RealizedPnL
+	tp.HedgeFundingUSD = ledger.Funding
+	tp.HedgeCommissionsUSD = ledger.Commissions
+	tp.HedgeIncomePartial = ledger.Partial
+	tp.FeesToCollectUSD = feesToCollect
+	tp.FeesTotalUSD = feesTotal
+
+	anyPriced := tp.ValueUSD > 0 || tp.Error == ""
+	if t.initialState == nil && anyPriced {
+		t.initialState = &Snapshot{
+			Timestamp:           snap.Timestamp,
+			Price0:              snap.Price0,
+			Price1:              snap.Price1,
+			Amount0:             snap.Amount0,
+			Amount1:             snap.Amount1,
+			ValueUSD:            snap.ValueUSD,
+			HedgePnL:            snap.HedgePnL,
+			HedgeRealizedPnL:    snap.HedgeRealizedPnL,
+			HedgeFundingUSD:     snap.HedgeFundingUSD,
+			HedgeCommissionsUSD: snap.HedgeCommissionsUSD,
+			FeesUSD:             snap.FeesUSD,
+			NetPnL:              0,
+		}
+	}
+
+	if t.initialState != nil {
+		comps := PnLComponents{
+			LPChange:        snap.ValueUSD - t.initialState.ValueUSD,
+			HedgeUnrealized: snap.HedgePnL - t.initialState.HedgePnL,
+			HedgeRealized:   ledger.RealizedPnL,
+			Funding:         ledger.Funding,
+			Commissions:     ledger.Commissions,
+			LPFees:          snap.FeesUSD - t.initialState.FeesUSD,
+		}
+		snap.NetPnL = comps.NetPnL()
+
+		elapsed := snap.Timestamp.Sub(t.initialState.Timestamp)
+		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(comps.LPFees, tp.ValueUSD, elapsed)
+
+		t.history = append(t.history, snap)
+		if len(t.history) > 1000 {
+			t.history = t.history[len(t.history)-1000:]
+		}
+		tp.InitialState = t.initialState
+		tp.History = t.history
+	}
+
+	return tp, nil
+}
+
+// priceLeg prices one position's pool and runs the fee-vs-volatility model,
+// returning a trackedLeg with the per-position PositionLeg filled in. A pricing
+// failure is non-fatal: the leg is still returned with whatever on-chain data is
+// available and an Error note.
+func (t *LiveTracker) priceLeg(ctx context.Context, report lp.PositionReport) trackedLeg {
+	tl := trackedLeg{report: report}
+	leg := PositionLeg{
+		TokenID:          report.TokenID,
 		Chain:            t.chain.Display,
 		ChainSlug:        t.chain.Slug,
 		ChainKind:        t.chain.Kind,
@@ -95,183 +266,110 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		Decimals1:        report.Decimals1,
 		UncollectedFees0: report.UncollectedFees0,
 		UncollectedFees1: report.UncollectedFees1,
-		TokensOwed0:      report.UncollectedFees0, // alias (back-compat)
-		TokensOwed1:      report.UncollectedFees1,
-		Source:           "live",
-		UpdatedAt:        time.Now(),
 	}
 
-	// Price the pool and run the fee-vs-volatility model. A pricing failure is
-	// non-fatal: we still report the position and hedge.
 	rp, perr := t.pricer.PoolByAddress(ctx, t.chain, report.PoolAddress)
 	if perr != nil {
-		tp.Error = fmt.Sprintf("pool pricing unavailable: %v", perr)
-	} else {
-		tp.Protocol = rp.Protocol
-		tp.DEX = rp.DEX
-		tp.FeeTier = rp.FeeTier
-		tp.TVLUSD = rp.TVLUSD
-		tp.Volume24hUSD = rp.Volume24hUSD
-		tp.Analysis = runAnalysis(ctx, rp, t.iv)
-		tp.ValueUSD = positionValueUSD(report, rp)
-		tp.Price0 = legPrice(report.Symbol0, rp)
-		tp.Price1 = legPrice(report.Symbol1, rp)
+		leg.Error = fmt.Sprintf("pool pricing unavailable: %v", perr)
+		tl.leg = withRangePrices(leg)
+		return tl
+	}
 
-		if t.bn != nil {
-			if perp, ok := hedgeFutures[datasource.NormalizeSymbol(report.Symbol0)]; ok {
-				if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
-					tp.Price0 = price
-				}
+	tl.rp = rp
+	tl.priced = true
+	tl.price0 = legPrice(report.Symbol0, rp)
+	tl.price1 = legPrice(report.Symbol1, rp)
+
+	// Prefer Binance mark prices for hedged legs when a client is present.
+	if t.bn != nil {
+		if perp, ok := perpForSymbol(report.Symbol0); ok {
+			if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+				tl.price0 = price
 			}
-			if perp, ok := hedgeFutures[datasource.NormalizeSymbol(report.Symbol1)]; ok {
-				if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
-					tp.Price1 = price
-				}
+		}
+		if perp, ok := perpForSymbol(report.Symbol1); ok {
+			if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+				tl.price1 = price
 			}
 		}
 	}
 
+	leg.Protocol = rp.Protocol
+	leg.DEX = rp.DEX
+	leg.FeeTier = rp.FeeTier
+	leg.TVLUSD = rp.TVLUSD
+	leg.Volume24hUSD = rp.Volume24hUSD
+	leg.Analysis = runAnalysis(ctx, rp, t.iv)
+	leg.Price0 = tl.price0
+	leg.Price1 = tl.price1
+	leg.ValueUSD = report.Amount0*tl.price0 + report.Amount1*tl.price1
+	tl.value = leg.ValueUSD
+	tl.leg = withRangePrices(leg)
+	return tl
+}
+
+// withRangePrices fills a PositionLeg's notional range-price fields from its
+// ticks + decimals (display-only, no network/chain access).
+func withRangePrices(leg PositionLeg) PositionLeg {
+	tp := TrackedPosition{
+		TickLower: leg.TickLower, TickUpper: leg.TickUpper, TickNow: leg.TickNow,
+		Decimals0: leg.Decimals0, Decimals1: leg.Decimals1,
+	}
 	tp.fillRangePrices()
+	leg.RangeLowerPrice = tp.RangeLowerPrice
+	leg.RangeUpperPrice = tp.RangeUpperPrice
+	leg.RangeCurrentPrice = tp.RangeCurrentPrice
+	leg.RangePositionPct = tp.RangePositionPct
+	return leg
+}
 
-	tp.Hedges = t.hedges(ctx, report)
-	if len(tp.Hedges) > 0 {
-		tp.Hedge = tp.Hedges[0]
-	}
-
-	if t.bn != nil {
-		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
-			tp.OpenShorts = open
-		}
-		if orders, err := t.bn.GetAllOpenOrders(ctx); err == nil {
-			tp.OpenLimitOrders = orders
-		}
-	}
-
-	price0, price1 := 0.0, 0.0
-	if rp.Address != "" {
-		price0 = legPrice(report.Symbol0, rp)
-		price1 = legPrice(report.Symbol1, rp)
-	}
-
-	// Sum of the open shorts' unrealized PnL — the live, resettable part of the
-	// hedge PnL.
-	hedgeUnrealized := 0.0
-	for _, h := range tp.Hedges {
-		hedgeUnrealized += h.UnrealizedPnL
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// Re-derive the cumulative hedge income ledger (realized PnL, funding,
-	// commissions) from Binance since inception. The income endpoint is the
-	// source of truth and re-fetching is robust, so we do not persist a running
-	// total — this relies on inception falling inside binance.IncomeLookback; if
-	// it predates that window the ledger comes back flagged Partial. Persisting
-	// across restarts is a separate later task.
-	var ledger binance.IncomeLedger
-	if t.bn != nil {
-		inceptionMs := snap0(t.initialState).Timestamp.UnixMilli()
-		if t.initialState == nil {
-			inceptionMs = tp.UpdatedAt.UnixMilli() // first poll: window is empty → zero ledger
-		}
-		if syms := hedgeSymbols(tp.Hedges); len(syms) > 0 {
-			if l, err := t.bn.GetHedgeIncome(ctx, syms, inceptionMs); err == nil {
-				ledger = l
-			} else {
-				log.Printf("[hedger] income history unavailable: %v", err)
-			}
-		}
-	}
-
-	// Update the LP fee ledger in TOKEN UNITS so a harvest (a leg's uncollected
-	// token amount falling) is detected without being fooled by a price-only drop
-	// in fee USD value. The cumulative total = banked collected + current
-	// uncollected, priced at current prices.
-	t.feeLedger.Update(report.UncollectedFees0, report.UncollectedFees1)
-	feesToCollect := t.feeLedger.ToCollectUSD(price0, price1)
-	feesTotal := t.feeLedger.TotalUSD(price0, price1)
-
-	// Snapshot for history.
-	snap := Snapshot{
-		Timestamp:           tp.UpdatedAt,
-		Price0:              price0,
-		Price1:              price1,
-		Amount0:             report.Amount0,
-		Amount1:             report.Amount1,
-		ValueUSD:            tp.ValueUSD,
-		HedgePnL:            hedgeUnrealized,
-		HedgeRealizedPnL:    ledger.RealizedPnL,
-		HedgeFundingUSD:     ledger.Funding,
-		HedgeCommissionsUSD: ledger.Commissions,
-		FeesUSD:             feesTotal, // cumulative collected + uncollected
-		NetPnL:              0,
-	}
-
-	// Surface the ledgers on the tracked position for the API/dashboard.
-	tp.HedgeRealizedPnL = ledger.RealizedPnL
-	tp.HedgeFundingUSD = ledger.Funding
-	tp.HedgeCommissionsUSD = ledger.Commissions
-	tp.HedgeIncomePartial = ledger.Partial
-	tp.FeesToCollectUSD = feesToCollect
-	tp.FeesTotalUSD = feesTotal
-
-	if t.initialState == nil && tp.Error == "" && rp.Address != "" {
-		// First successful scan, capture baseline.
-		t.initialState = &Snapshot{
-			Timestamp:           snap.Timestamp,
-			Price0:              snap.Price0,
-			Price1:              snap.Price1,
-			Amount0:             snap.Amount0,
-			Amount1:             snap.Amount1,
-			ValueUSD:            snap.ValueUSD,
-			HedgePnL:            snap.HedgePnL,
-			HedgeRealizedPnL:    snap.HedgeRealizedPnL,
-			HedgeFundingUSD:     snap.HedgeFundingUSD,
-			HedgeCommissionsUSD: snap.HedgeCommissionsUSD,
-			FeesUSD:             snap.FeesUSD,
-			NetPnL:              0, // Initial net PnL is zero
+// buildPortfolio assembles the aggregated TrackedPosition from the tracked legs.
+// The top-level pool fields mirror the first (primary) position for backward
+// compatibility with the single-position dashboard cards, while ValueUSD,
+// Positions and (later) Exposures describe the whole portfolio.
+func buildPortfolio(legs []trackedLeg) TrackedPosition {
+	tp := TrackedPosition{}
+	for i, l := range legs {
+		tp.Positions = append(tp.Positions, l.leg)
+		tp.ValueUSD += l.value
+		if i == 0 {
+			primary := l.leg
+			tp.TokenID = primary.TokenID
+			tp.Chain = primary.Chain
+			tp.ChainSlug = primary.ChainSlug
+			tp.ChainKind = primary.ChainKind
+			tp.Protocol = primary.Protocol
+			tp.DEX = primary.DEX
+			tp.PoolAddress = primary.PoolAddress
+			tp.PoolName = primary.PoolName
+			tp.Symbol0 = primary.Symbol0
+			tp.Symbol1 = primary.Symbol1
+			tp.Amount0 = primary.Amount0
+			tp.Amount1 = primary.Amount1
+			tp.TickLower = primary.TickLower
+			tp.TickUpper = primary.TickUpper
+			tp.TickNow = primary.TickNow
+			tp.InRange = primary.InRange
+			tp.Decimals0 = primary.Decimals0
+			tp.Decimals1 = primary.Decimals1
+			tp.RangeLowerPrice = primary.RangeLowerPrice
+			tp.RangeUpperPrice = primary.RangeUpperPrice
+			tp.RangeCurrentPrice = primary.RangeCurrentPrice
+			tp.RangePositionPct = primary.RangePositionPct
+			tp.UncollectedFees0 = primary.UncollectedFees0
+			tp.UncollectedFees1 = primary.UncollectedFees1
+			tp.TokensOwed0 = primary.UncollectedFees0
+			tp.TokensOwed1 = primary.UncollectedFees1
+			tp.Price0 = primary.Price0
+			tp.Price1 = primary.Price1
+			tp.FeeTier = primary.FeeTier
+			tp.TVLUSD = primary.TVLUSD
+			tp.Volume24hUSD = primary.Volume24hUSD
+			tp.Analysis = primary.Analysis
+			tp.Error = primary.Error
 		}
 	}
-
-	if t.initialState != nil {
-		// Strategy net PnL = the *change* since inception, summing every term with
-		// its documented sign (see PnLComponents.NetPnL):
-		//   + LP value change   (current LP value − inception LP value)
-		//   + hedge unrealized  (open short PnL, baselined so the curve starts at 0)
-		//   + hedge realized    (cumulative since inception — already ~0 at start
-		//                        because the income window opens at inception)
-		//   + funding           (cumulative, signed: + when the short receives)
-		//   − commissions       (cumulative paid cost)
-		//   + LP fees           (cumulative collected + uncollected, baselined)
-		// The hedge unrealized and LP fees are baselined against inception; the
-		// income terms are inception-relative by construction (the income fetch
-		// starts at inception), so they are not baselined again.
-		comps := PnLComponents{
-			LPChange:        snap.ValueUSD - t.initialState.ValueUSD,
-			HedgeUnrealized: snap.HedgePnL - t.initialState.HedgePnL,
-			HedgeRealized:   ledger.RealizedPnL,
-			Funding:         ledger.Funding,
-			Commissions:     ledger.Commissions,
-			LPFees:          snap.FeesUSD - t.initialState.FeesUSD,
-		}
-		snap.NetPnL = comps.NetPnL()
-
-		elapsed := snap.Timestamp.Sub(t.initialState.Timestamp)
-		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(comps.LPFees, tp.ValueUSD, elapsed)
-
-		t.history = append(t.history, snap)
-
-		// Optional: limit history size
-		if len(t.history) > 1000 {
-			t.history = t.history[len(t.history)-1000:]
-		}
-
-		tp.InitialState = t.initialState
-		tp.History = t.history
-	}
-
-	return tp, nil
+	return tp
 }
 
 // snap0 returns a zero-value Snapshot for a nil pointer, so callers can read a
@@ -298,43 +396,41 @@ func hedgeSymbols(hedges []Hedge) []string {
 	return syms
 }
 
-// hedges determines the perp shorts that offset the position's volatile legs and
-// reads the current Binance positions when credentials are configured.
-// It also places/syncs orders if credentials are configured and dry-run is false.
-func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []Hedge {
-	legs := hedgeLegs(report.Symbol0, report.Symbol1, report.Amount0, report.Amount1)
-	if len(legs) == 0 {
+// hedges builds one simplified short per aggregated asset exposure and reads (or
+// syncs, when not dry-run) the matching Binance position.
+func (t *LiveTracker) hedges(ctx context.Context, exposures []AssetExposure) []Hedge {
+	if len(exposures) == 0 {
 		return []Hedge{{
 			Available: false,
-			Note:      "no hedgeable (perp-listed) leg in this pool",
+			Note:      "no hedgeable (perp-listed) leg across tracked positions",
 		}}
 	}
 
 	var hedges []Hedge
-	for _, leg := range legs {
+	for _, ex := range exposures {
 		h := Hedge{
 			Venue:          "Binance Futures",
-			Symbol:         leg.Perp,
-			ExposureSymbol: leg.Asset,
-			LPExposure:     leg.Amount,
-			TargetShort:    leg.Amount,
+			Symbol:         ex.Perp,
+			ExposureSymbol: ex.DisplaySymbol,
+			LPExposure:     ex.Amount,
+			TargetShort:    ex.Amount,
 			DryRun:         t.dryRun,
+			Note:           sourcesNote(ex),
 		}
 
 		if t.bn == nil {
 			h.Available = false
-			h.Note = "advisory only — no Binance credentials configured"
+			h.Note = "advisory only — no Binance credentials configured · " + h.Note
 			hedges = append(hedges, h)
 			continue
 		}
 
-		// Perform the actual hedge sync if keys are present (SyncShort respects dryRun)
-		err := t.bn.SyncShort(ctx, leg.Perp, leg.Amount, 0.001, t.dryRun, t.strategy)
-		if err != nil {
-			log.Printf("[hedger] SyncShort failed for %s: %v", leg.Perp, err)
+		// Sync the single aggregate short to the summed exposure (respects dryRun).
+		if err := t.bn.SyncShort(ctx, ex.Perp, ex.Amount, 0.001, t.dryRun, t.strategy); err != nil {
+			log.Printf("[hedger] SyncShort failed for %s: %v", ex.Perp, err)
 		}
 
-		size, err := t.bn.GetPositionSize(ctx, leg.Perp)
+		size, err := t.bn.GetPositionSize(ctx, ex.Perp)
 		if err != nil {
 			h.Available = false
 			h.Note = fmt.Sprintf("could not read Binance position: %v", err)
@@ -349,15 +445,15 @@ func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []He
 		h.Drift = h.TargetShort - current
 		h.InSync = absf(h.Drift) < 0.01
 		h.Available = true
-		h.Note = "live"
 		if t.dryRun {
-			h.Note = "live read · hedge sync is dry-run"
+			h.Note = "live read · hedge sync is dry-run · " + h.Note
+		} else {
+			h.Note = "live · " + h.Note
 		}
 
-		// Enrich with entry/mark/PnL from the open positions list.
 		if open, err := t.bn.GetOpenPositions(ctx); err == nil {
 			for _, p := range open {
-				if p.Symbol == leg.Perp {
+				if p.Symbol == ex.Perp {
 					h.EntryPrice = p.EntryPrice
 					h.MarkPrice = p.MarkPrice
 					h.UnrealizedPnL = p.UnrealizedPnL
@@ -369,6 +465,23 @@ func (t *LiveTracker) hedges(ctx context.Context, report lp.PositionReport) []He
 		hedges = append(hedges, h)
 	}
 	return hedges
+}
+
+// sourcesNote summarises which positions contribute to an aggregated exposure,
+// e.g. "summed from 2 positions (WETH, wstETH)".
+func sourcesNote(ex AssetExposure) string {
+	if len(ex.Sources) <= 1 {
+		return "single position"
+	}
+	syms := map[string]bool{}
+	var order []string
+	for _, s := range ex.Sources {
+		if !syms[s.Symbol] {
+			syms[s.Symbol] = true
+			order = append(order, s.Symbol)
+		}
+	}
+	return fmt.Sprintf("summed from %d positions (%s)", len(ex.Sources), strings.Join(order, ", "))
 }
 
 // legPrice returns the USD price of one token symbol from the pool's reported
@@ -384,17 +497,6 @@ func legPrice(sym string, rp datasource.RawPool) float64 {
 		return 1
 	}
 	return 0
-}
-
-// legPrices returns the current USD prices of the position's two legs.
-func legPrices(report lp.PositionReport, rp datasource.RawPool) (float64, float64) {
-	return legPrice(report.Symbol0, rp), legPrice(report.Symbol1, rp)
-}
-
-// positionValueUSD prices both legs of the position using the pool's reported
-// base/quote USD prices, matching by symbol.
-func positionValueUSD(report lp.PositionReport, rp datasource.RawPool) float64 {
-	return report.Amount0*legPrice(report.Symbol0, rp) + report.Amount1*legPrice(report.Symbol1, rp)
 }
 
 func absf(x float64) float64 {

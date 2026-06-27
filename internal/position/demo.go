@@ -73,10 +73,42 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 
 	res := runAnalysis(ctx, rp, t.iv)
 
-	// Hedge: short WETH exposure on Binance, deliberately a touch out of sync.
-	current := wethAmount - (0.05 + rng.Float64()*0.25)
-	hedge := buildHedge("WETH", "ETHUSDT", wethAmount, current, entryPrice, mark, true, true,
-		"Binance Futures (testnet) · demo")
+	// A second synthetic position holding the SAME underlying (ETH) through a
+	// SYNTHETIC token — a wstETH/WETH pool — so the demo exercises the
+	// multi-position aggregation: both the WETH leg here and the wstETH + WETH
+	// legs there fold into one ETH short.
+	wstethAmount := 1.5 + rng.Float64()*0.8
+	weth2Amount := 0.8 + rng.Float64()*0.5
+	pos2Value := wstethAmount*mark + weth2Amount*mark
+
+	perp, _ := resolvePerp("ETH") // ETHUSDC by default (USDC-preferred)
+
+	primaryLeg := PositionLeg{
+		TokenID: t.tokenID, Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
+		Protocol: rp.Protocol, DEX: rp.DEX, PoolAddress: rp.Address, PoolName: rp.Name,
+		Symbol0: "WETH", Symbol1: "USDC", Amount0: wethAmount, Amount1: usdcAmount,
+		TickLower: -201_400, TickUpper: -199_800, TickNow: -200_600, InRange: true,
+		Decimals0: 18, Decimals1: 6, ValueUSD: valueUSD, Price0: mark, Price1: 1,
+		FeeTier: rp.FeeTier, TVLUSD: rp.TVLUSD, Volume24hUSD: rp.Volume24hUSD, Analysis: res,
+	}
+	secondLeg := PositionLeg{
+		TokenID: t.tokenID + 1, Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
+		Protocol: "Aerodrome", DEX: "aerodrome_slipstream",
+		PoolAddress: "0x4d69971ccd4a636c403a3c1b00c85e99bb9b5606", PoolName: "wstETH / WETH",
+		Symbol0: "wstETH", Symbol1: "WETH", Amount0: wstethAmount, Amount1: weth2Amount,
+		TickLower: -2_000, TickUpper: 2_000, TickNow: 100, InRange: true,
+		Decimals0: 18, Decimals1: 18, ValueUSD: pos2Value, Price0: mark, Price1: mark,
+		FeeTier: 0.0001, TVLUSD: 9_000_000, Volume24hUSD: 4_000_000, Analysis: res,
+	}
+	positions := []PositionLeg{withRangePrices(primaryLeg), withRangePrices(secondLeg)}
+	exposures := aggregateExposures(positions)
+
+	// Aggregate ETH exposure across both positions → a single simplified short,
+	// deliberately a touch out of sync.
+	totalETH := wethAmount + wstethAmount + weth2Amount
+	current := totalETH - (0.05 + rng.Float64()*0.25)
+	hedge := buildHedge("WETH", perp, totalETH, current, entryPrice, mark, true, true,
+		"Binance Futures (testnet) · demo · "+sourcesNote(exposures[0]))
 
 	tp := TrackedPosition{
 		TokenID:     t.tokenID,
@@ -109,6 +141,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		TVLUSD:           rp.TVLUSD,
 		Volume24hUSD:     rp.Volume24hUSD,
 		Analysis:         res,
+		Positions:        positions,
+		Exposures:        exposures,
 		Hedges:           []Hedge{hedge},
 		Hedge:            hedge,
 		Source:           "demo",
@@ -160,8 +194,9 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 // demoOpenShorts builds a handful of synthetic Binance positions for the
 // open-shorts table. Short PnL follows size*(mark-entry) (size is negative).
 func demoOpenShorts(rng *rand.Rand, ethShort, ethEntry, ethMark float64) []binance.Position {
+	ethPerp, _ := resolvePerp("ETH")
 	shorts := []binance.Position{
-		{Symbol: "ETHUSDT", Size: -ethShort, EntryPrice: ethEntry, MarkPrice: ethMark},
+		{Symbol: ethPerp, Size: -ethShort, EntryPrice: ethEntry, MarkPrice: ethMark},
 		{Symbol: "BTCUSDT", Size: -(0.04 + rng.Float64()*0.08), EntryPrice: 64000, MarkPrice: 64000 * (0.97 + rng.Float64()*0.06)},
 		{Symbol: "SOLUSDT", Size: -(8 + rng.Float64()*20), EntryPrice: 150, MarkPrice: 150 * (0.95 + rng.Float64()*0.1)},
 	}

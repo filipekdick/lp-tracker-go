@@ -85,7 +85,23 @@ type Result struct {
 	Methods map[string]MethodResult `json:"methods,omitempty"`
 	// DefaultMethod names the method the top-level fields correspond to.
 	DefaultMethod string `json:"defaultMethod,omitempty"`
+
+	// RangeSim is the aggregator-style projected fee APR for a hypothetical
+	// deposit into a volatility-sized concentrated range (see rangeapr.go). It is
+	// populated whenever a realised-volatility signal and fee flow exist, so the
+	// scanner/dashboard can rank pools by the APR a concentrated position would
+	// actually earn rather than the full-range APR alone.
+	RangeSim *RangeSimulation `json:"rangeSim,omitempty"`
 }
+
+// DefaultSimDepositUSD is the hypothetical deposit used for the per-pool range
+// simulation, and DefaultSimZ is the band width (in sigma) of the
+// volatility-sized range. Both are package-level so a caller can tune the
+// projection without touching the model.
+var (
+	DefaultSimDepositUSD = 10_000.0
+	DefaultSimZ          = 1.0
+)
 
 // thresholds for the verdict bands, expressed as a fee-yield ratio (fees vs.
 // the LVR cost implied by realised volatility).
@@ -118,6 +134,23 @@ func Analyze(in Input) Result {
 	res.DefaultMethod = string(DefaultMethod)
 	if len(in.Bars) > 0 {
 		res.Methods = buildMethods(in, res.FeeAPR)
+	}
+
+	// Project the fee APR for a concentrated position sitting in a
+	// volatility-sized range around the pool's current price — the way LP
+	// aggregators present "estimated APR" — so pools can be compared on what a
+	// concentrated deposit would earn, not just the full-range yield.
+	if len(in.Closes) > 0 && res.RealizedVol > 0 {
+		horizon := in.HorizonDays
+		if horizon <= 0 {
+			horizon = DefaultHorizonDays
+		}
+		cur := in.Closes[len(in.Closes)-1]
+		sim := SimulateVolRange(in.Volume24hUSD, in.FeeTier, in.TVLUSD, cur,
+			res.RealizedVol, horizon, DefaultSimZ, DefaultSimDepositUSD)
+		if sim.FeeAPR > 0 {
+			res.RangeSim = &sim
+		}
 	}
 	return res
 }
