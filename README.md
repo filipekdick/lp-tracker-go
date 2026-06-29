@@ -2,10 +2,14 @@
 
 A crypto liquidity-pool analyzer that does two things:
 
-1. **Tracks one LP position and its hedge** — reads an Aerodrome (Base)
-   position from chain, prices it, runs the fee-vs-volatility model over its
-   pool, and reports the Binance perpetual **short** needed to hedge the
-   position's directional exposure (target vs. current short, drift, PnL).
+1. **Tracks one or more LP positions and their hedge** — reads Aerodrome (Base)
+   positions from chain, prices them, runs the fee-vs-volatility model over each
+   pool, **sums the volatile-leg exposure across positions by asset** (folding
+   synthetics like wstETH/cbETH into ETH) and reports the Binance perpetual
+   **short** needed to hedge the net directional exposure with a single
+   simplified position per asset (target vs. current short, drift, PnL). The
+   hedge defaults to **token/USDC** perps, falling back to token/USDT only when
+   no USDC contract is listed.
 2. **Auto-scans the most profitable pools across chains** — every
    `SCAN_INTERVAL` it pulls the most active pools across multiple L1s and L2s
    and ranks them by how much their fee yield beats the assets' **price
@@ -191,6 +195,44 @@ helpers) are unit-tested in `concentrated_test.go`: the breakeven equals the
 fee-implied σ, the headroom equals `√` of the old fee/vol ratio, and the
 time-in-range equals `k²·T` and is invariant to σ.
 
+### Range-based liquidity APR for simulations — `internal/analyzer/rangeapr.go`
+
+The full-range `feeAPR = volume·feeTier/TVL·365` understates what a
+**concentrated** position earns, because a tight range puts the same dollar to
+work as more liquidity at the current price. The simulation projects the fee APR
+the way **official LP aggregators** (Revert, Krystal, Uniswap's position UI) do
+— by the share of the **in-range liquidity** a deposit would capture:
+
+```
+annualFees   = volume24h · feeTier · 365
+yourShare    = deposit / (activeLiquidityInRange + deposit)
+projectedAPR = annualFees · yourShare / deposit
+             = volume24h · feeTier · 365 / (activeLiquidityInRange + deposit)
+```
+
+As `deposit → 0` this is the **marginal** APR; for a real deposit it
+**self-dilutes**, exactly as adding liquidity dilutes the pool. The active
+in-range liquidity is estimated from the pool's TVL via the same concentration
+factor `C(δ) = 1/(1 − e^{−δ/2})` used throughout the model:
+
+```
+activeLiquidityInRange = TVL / C(δ)
+```
+
+so the marginal APR equals `fullRangeAPR · C(δ)` — the familiar capital-efficiency
+boost — and recovers the full-range APR as the range widens (`C → 1`,
+`active → TVL`). The per-pool simulation (`Result.RangeSim`, served to the
+dashboard) sizes the range by **each pool's own realised volatility** — a ±1σ
+(1-day) containment band (`SimulateVolRange`, reusing `LogHalfWidth` from
+`ranges.go`) — so the range adapts per pool rather than being a fixed width, and
+the projected APR reflects the concentration that range affords. It needs **no
+on-chain tick data** (TVL + volume + fee tier + the band), and like the breakeven
+σ it is **optimistic** (assumes the pool is no more concentrated than full-range,
+and counts swap fees only). The functions are unit-tested in
+[`rangeapr_test.go`](internal/analyzer/rangeapr_test.go): the marginal APR equals
+`fullRangeAPR · C`, active liquidity shrinks with the range, and a deposit equal
+to the active liquidity halves the APR.
+
 ### Junk-pool filter (scanner) — `internal/scanner`
 
 GeckoTerminal's pools endpoint only sorts by volume, so dust and wash-trade pools
@@ -212,7 +254,7 @@ against a hand calculation (feeAPR exact) and the generating sigma
 integration smoke test ([`api_test.go`](internal/api/api_test.go)) asserts the
 new API fields are present, finite and within plausible bounds.
 
-## Tracked position & delta hedge
+## Tracked positions, exposure aggregation & delta hedge
 
 A concentrated-liquidity position is net **long** its volatile leg (e.g. the
 WETH in a WETH/USDC pool), so its value falls when ETH falls. The tracker
@@ -220,9 +262,31 @@ neutralises that directional risk by shorting the same number of units on a
 perpetual future:
 
 ```
-target short (ETHUSDT) = WETH units currently held in the LP
+target short (ETHUSDC) = ETH units currently held in the LP
 drift                  = target short − current short
 ```
+
+### Multiple positions → one simplified short per asset
+
+`TRACK_TOKEN_IDS` lists every LP position to track. A wallet usually holds the
+**same** underlying exposure spread across many positions — ETH in a WETH/USDC
+pool, more ETH in a wstETH/WETH pool, more in a cbETH/USDC pool. The tracker
+reads each position on chain and **sums the volatile-leg units by their
+normalised asset**, folding the *synthetics* of one asset together (WETH,
+wstETH, cbETH, stETH → **ETH**; WBTC, cbBTC, tBTC → **BTC**, via
+`datasource.NormalizeSymbol`). Each aggregated asset is then hedged with a
+**single** short sized to the portfolio total, instead of one noisy short per
+pool leg. The dashboard's portfolio card lists every position and the per-asset
+exposure, with each hedge annotated by the positions it was summed from
+(`aggregate.go`, `aggregateExposures`).
+
+### USDC-margined perps by default
+
+The hedge defaults to the **token/USDC** perpetual and only falls back to
+**token/USDT** when no USDC contract is listed for the asset (`HEDGE_QUOTE=usdc`,
+the default; set `usdt` to force USDT). So ETH hedges on `ETHUSDC` while an asset
+without a USDC perp (e.g. `VVV`) stays on `VVVUSDT`. The resolution lives in
+`resolvePerp` (`internal/position/position.go`).
 
 The dashboard's **Tracked position & hedge** panel shows, side by side:
 
@@ -357,7 +421,9 @@ DATA_SOURCE=live SCAN_INTERVAL=10m go run ./cmd/server
 | `MIN_TVL_USD` | `50000` | drop pools with reserves below this (junk filter) |
 | `MAX_TURNOVER` | `20` | drop pools with 24h-volume/TVL above this (wash-trade filter) |
 | `CHAINS` | built-in set | comma-separated slugs, e.g. `eth,base,arbitrum` |
-| `TRACK_TOKEN_ID` | `71002035` | Aerodrome position token ID to track |
+| `TRACK_TOKEN_IDS` | `71002035` | comma-separated Aerodrome position token IDs to track and aggregate |
+| `TRACK_TOKEN_ID` | — | legacy single-id form, still honoured |
+| `HEDGE_QUOTE` | `usdc` | perp quote currency: `usdc` (prefer token/USDC, fall back to token/USDT) or `usdt` |
 | `HEDGE_DRY_RUN` | `true` | `false` lets `cmd/hedge` actually place orders |
 | `RPC_URL` | — | Base RPC (required for **live** position tracking) |
 | `BINANCE_TESTNET_API_KEY` / `_SECRET` | — | optional; enables live hedge read |

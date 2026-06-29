@@ -53,13 +53,18 @@ func main() {
 		MaxTurnover:      envFloat("MAX_TURNOVER", scanner.DefaultMaxTurnover),
 	}
 
+	// Hedge quote preference: token/USDC by default, token/USDT only as a
+	// fallback when no USDC perp is listed. "usdt" forces the USDT contract.
+	position.HedgeQuotePreference = strings.ToLower(envStr("HEDGE_QUOTE", "usdc"))
+
 	source, implied := buildSources()
 	log.Printf("data source: %s | %d chains | %d pools/chain | position every %s | pool scan: manual trigger only",
 		source.Name(), len(cfg.Chains), cfg.PerChain, cfg.PositionInterval)
 
 	tracker := buildTracker(source, implied)
 	if tracker != nil {
-		log.Printf("position tracking: %s | token ID %d", tracker.Name(), envInt64("TRACK_TOKEN_ID", defaultTokenID))
+		ids := trackTokenIDs()
+		log.Printf("position tracking: %s | token IDs %v | hedge quote: %s", tracker.Name(), ids, position.HedgeQuotePreference)
 	}
 
 	sc := scanner.New(cfg, source, implied, tracker)
@@ -122,23 +127,23 @@ const (
 // reads the Binance hedge. A misconfigured live tracker degrades to the demo
 // tracker rather than crashing the server.
 func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource) position.Tracker {
-	tokenID := envInt64("TRACK_TOKEN_ID", defaultTokenID)
+	tokenIDs := trackTokenIDs()
 
 	if strings.ToLower(envStr("DATA_SOURCE", "demo")) != "live" {
-		return position.NewDemoTracker(tokenID)
+		return position.NewDemoTracker(tokenIDs[0])
 	}
 
 	rpcURL := os.Getenv("RPC_URL")
 	gecko, okGecko := source.(*datasource.GeckoTerminal)
 	if rpcURL == "" || !okGecko {
 		log.Println("live position tracking needs RPC_URL and the live data source; using demo tracker")
-		return position.NewDemoTracker(tokenID)
+		return position.NewDemoTracker(tokenIDs[0])
 	}
 
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		log.Printf("could not dial RPC for position tracking (%v); using demo tracker", err)
-		return position.NewDemoTracker(tokenID)
+		return position.NewDemoTracker(tokenIDs[0])
 	}
 
 	nfpmAddr := envStr("NFPM_ADDRESS", "0x827922686190790b37229fd06084350E74485b72")
@@ -159,7 +164,36 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource)
 	upper := envFloat("HEDGE_MARKET_THRESHOLD", envFloat("HEDGE_DRIFT_THRESHOLD", 0.06))
 	strategy := &hedger.Strategy{LowerThreshold: lower, UpperThreshold: upper}
 
-	return position.NewLiveTracker(reader, gecko, implied, bn, tokenID, base, dryRun, strategy)
+	return position.NewLiveTracker(reader, gecko, implied, bn, tokenIDs, base, dryRun, strategy)
+}
+
+// trackTokenIDs reads the LP positions to track. TRACK_TOKEN_IDS takes a
+// comma-separated list (e.g. "71002035,71002099"); the legacy single-value
+// TRACK_TOKEN_ID is honoured for backward compatibility. Always returns at least
+// one ID (the built-in default) so callers can index [0] safely.
+func trackTokenIDs() []int64 {
+	raw := envStr("TRACK_TOKEN_IDS", os.Getenv("TRACK_TOKEN_ID"))
+	if strings.TrimSpace(raw) == "" {
+		return []int64{defaultTokenID}
+	}
+	var ids []int64
+	seen := map[int64]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		ids = append(ids, n)
+	}
+	if len(ids) == 0 {
+		return []int64{defaultTokenID}
+	}
+	return ids
 }
 
 // resolveChains maps a comma-separated slug list onto the known chain set,
@@ -198,15 +232,6 @@ func envStr(key, def string) string {
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func envInt64(key string, def int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
 	}
@@ -253,16 +278,17 @@ func runStartupSummary(ctx context.Context) {
 	}
 	fmt.Printf("ok (chain id %s)\n", chainID.String())
 
-	// Reading position
-	tokenID := envInt64("TRACK_TOKEN_ID", defaultTokenID)
+	// Reading positions
+	tokenIDs := trackTokenIDs()
 	nfpmAddrStr := envStr("NFPM_ADDRESS", "0x827922686190790b37229fd06084350E74485b72")
-	fmt.Printf("[startup] reading LP position %d on NFPM %s... ", tokenID, nfpmAddrStr)
-
 	reader := lp.NewReader(client, nfpmAddrStr, aeroFactoryAddress)
-	report, err := reader.ReadPosition(tokenID)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-	} else {
+	for _, tokenID := range tokenIDs {
+		fmt.Printf("[startup] reading LP position %d on NFPM %s... ", tokenID, nfpmAddrStr)
+		report, err := reader.ReadPosition(tokenID)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			continue
+		}
 		fmt.Printf("ok\n")
 		inRangeStr := "out of range"
 		if report.InRange {

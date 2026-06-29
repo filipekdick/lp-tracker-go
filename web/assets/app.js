@@ -31,6 +31,7 @@ function view(p) {
     positionFeeApr: a.positionFeeApr,
     impliedVol: a.impliedVol,
     hasImplied: a.hasImplied,
+    rangeSim: a.rangeSim,
   };
   if (m && m.ok) {
     return Object.assign(base, {
@@ -230,6 +231,54 @@ function driftCell(h) {
   return `<span class="${cls}">${sign}${fmt.amount(h.drift)} ${h.exposureSymbol} · ${sign}${pct.toFixed(2)}%</span>`;
 }
 
+// renderPortfolioCard lists every tracked LP position and the per-asset exposure
+// summed across them (synthetics folded into their underlying), which the single
+// simplified short hedges. Returns "" for a single position so the original
+// three-card layout is unchanged.
+function renderPortfolioCard(p) {
+  const positions = p.positions || [];
+  const exposures = p.exposures || [];
+  if (positions.length <= 1) return "";
+
+  const posRows = positions
+    .map((pos) => {
+      const inPill = pos.inRange
+        ? '<span class="pill in">in</span>'
+        : '<span class="pill out">out</span>';
+      const apr = pos.analysis
+        ? fmt.pct(pos.analysis.positionFeeApr || pos.analysis.feeApr)
+        : "—";
+      return `<div class="liq-row">
+        <div class="liq-sym">${pos.poolName} ${inPill}</div>
+        <div class="liq-col"><span class="liq-amt">#${pos.tokenId}</span><span class="liq-usd">${fmt.usd(pos.valueUsd)}</span></div>
+        <div class="liq-col"><span class="liq-amt">${pos.protocol || ""}</span><span class="liq-usd">APR ${apr}</span></div>
+      </div>`;
+    })
+    .join("");
+
+  const expRows = exposures
+    .map((ex) => {
+      const srcSyms = (ex.sources || [])
+        .map((s) => s.symbol)
+        .filter((v, i, self) => self.indexOf(v) === i)
+        .join(", ");
+      return `<div class="liq-row">
+        <div class="liq-sym">${ex.asset} <span class="liq-badge">${ex.perp}</span></div>
+        <div class="liq-col"><span class="liq-amt">${fmt.amount(ex.amount)} ${ex.asset}</span><span class="liq-usd">${ex.sources ? ex.sources.length : 0} pos · ${srcSyms}</span></div>
+      </div>`;
+    })
+    .join("");
+
+  return `<div class="tcard">
+    <h3>Portfolio · ${positions.length} positions</h3>
+    <p class="hint" style="margin:4px 0 8px">Exposure to the same asset across every LP — including synthetic variants — is summed and hedged with one short per asset.</p>
+    <div class="liq-rows">${posRows}</div>
+    <div style="border-top: 1px solid var(--border); margin: 12px 0;"></div>
+    <h3 style="margin-bottom:6px">Aggregated exposure</h3>
+    <div class="liq-rows">${expRows}</div>
+  </div>`;
+}
+
 function renderPosition() {
   const section = document.getElementById("tracked");
   const p = state.position;
@@ -239,8 +288,13 @@ function renderPosition() {
   }
   section.hidden = false;
 
+  const posCount = (p.positions || []).length;
+  const idLabel =
+    posCount > 1
+      ? `${posCount} positions · single aggregated hedge`
+      : `token #${p.tokenId}`;
   document.getElementById("tracked-sub").innerHTML =
-    `${p.protocol} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · token #${p.tokenId}` +
+    `${p.protocol} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · ${idLabel}` +
     (p.error ? ` · <span style="color:var(--red)">${p.error}</span>` : "");
 
   const a = p.analysis || {};
@@ -512,10 +566,16 @@ function renderPosition() {
     ${notes ? `<p class="hint" style="margin-top:8px">${anyDryRun ? "🔒 dry-run · " : ""}${notes}</p>` : ""}
   </div>`;
 
+  // Portfolio card: every tracked LP position and the per-asset exposure summed
+  // across them (synthetics folded in), which the single simplified short hedges.
+  const portfolio = renderPortfolioCard(p);
+
   document.getElementById("position-summary").innerHTML = summaryCards;
-  // Second row: exactly three cards — Liquidity Position (with range details),
-  // Fees & Rewards (with the fee-vs-volatility analysis), and the Perp hedge.
-  document.getElementById("tracked-grid").innerHTML = liq + feesRewards + hedge;
+  // Second row: Liquidity Position (with range details), Fees & Rewards (with the
+  // fee-vs-volatility analysis), the Perp hedge, and — when several positions are
+  // tracked — the aggregated portfolio card.
+  document.getElementById("tracked-grid").innerHTML =
+    liq + feesRewards + hedge + portfolio;
 
   const shortsSec = document.getElementById("open-shorts-section");
   if (p.openShorts && p.openShorts.length > 0) {
@@ -1012,6 +1072,21 @@ function renderDetail(p) {
     unknown: "Not enough data to judge this pool.",
   }[a.verdict];
 
+  // Range simulation: the aggregator-style projected fee APR for a hypothetical
+  // deposit into a volatility-sized concentrated range (share of in-range
+  // liquidity). Only present when the server attached one.
+  const sim = a.rangeSim;
+  const simHtml = sim
+    ? `<div class="bars-title" title="Projected fee APR for a deposit into a ±1σ (1-day) range, computed the way LP aggregators do: your share of the in-range liquidity. APR = volume·fee·365 / (active-in-range liquidity + deposit). Optimistic; swap fees only.">Range simulation · concentrated APR</div>
+       <div class="metric-grid">
+         <div class="metric"><div class="k">Projected APR</div><div class="v ratio-pos">${fmt.pct(sim.feeApr)}</div></div>
+         <div class="metric"><div class="k" title="Capital-efficiency multiplier of this range vs full-range.">Concentration</div><div class="v">${sim.concentrationX.toFixed(1)}×</div></div>
+         <div class="metric"><div class="k" title="Deposit size used for the projection.">On deposit</div><div class="v">${fmt.usd(sim.depositUsd)}</div></div>
+         <div class="metric"><div class="k">Est. fees / day</div><div class="v">${fmt.usd(sim.dailyFeesUsd)}</div></div>
+       </div>
+       <p class="hint" style="margin:6px 0 0">Range ${fmt.price(sim.lowerPrice)} – ${fmt.price(sim.upperPrice)} · active in-range liquidity ≈ ${fmt.usd(sim.activeLiquidityUsd)}</p>`
+    : "";
+
   content.innerHTML = `
     <h2>${p.name}</h2>
     <div class="sub">${p.dex} · ${p.chain} <span class="layer ${p.chainKind}">${p.chainKind}</span> · fee ${fmt.pct(p.feeTier)}</div>
@@ -1029,6 +1104,8 @@ function renderDetail(p) {
     </div>
 
     ${bandsHtml}
+
+    ${simHtml}
 
     <div class="bars-title" title="Breakeven σ = √(8·feeAPR) is the concentration-invariant (full-range) breakeven — OPTIMISTIC, since the pool's real on-chain concentration would lower it, and it counts swap fees only (excludes farm/gauge incentives like AERO).">Volatility comparison (annualized)</div>
     <div class="bars">

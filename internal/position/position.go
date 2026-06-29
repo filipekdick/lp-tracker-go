@@ -98,6 +98,12 @@ type TrackedPosition struct {
 	// Fee-versus-volatility analysis for this pool.
 	Analysis analyzer.Result `json:"analysis"`
 
+	// Portfolio view: every tracked LP position individually, and the per-asset
+	// exposure summed across all of them (synthetics folded in). Positions is
+	// empty for a single-position tracker; Exposures drives the simplified hedge.
+	Positions []PositionLeg   `json:"positions,omitempty"`
+	Exposures []AssetExposure `json:"exposures,omitempty"`
+
 	// Hedge state.
 	Hedges          []Hedge              `json:"hedges"`
 	Hedge           Hedge                `json:"hedge"` // Backward compatibility
@@ -157,13 +163,51 @@ type Tracker interface {
 	CancelOrder(ctx context.Context, symbol string, orderID int64) error
 }
 
-// hedgeFutures maps a (possibly wrapped) spot symbol to the perp used to hedge
-// it. Only assets with a liquid linear perp are hedgeable.
-var hedgeFutures = map[string]string{
-	"ETH": "ETHUSDT", "BTC": "BTCUSDT", "SOL": "SOLUSDT",
-	"ARB": "ARBUSDT", "OP": "OPUSDT", "AVAX": "AVAXUSDT",
-	"LINK": "LINKUSDT", "MATIC": "MATICUSDT", "BNB": "BNBUSDT",
-	"VVV": "VVVUSDT", "VIRTUAL": "VIRTUALUSDT",
+// hedgeBaseAssets is the set of normalized assets with a liquid linear perp on
+// Binance. The value is the perp's base symbol (the part before the quote); the
+// quote (USDC preferred, USDT fallback) is appended by resolvePerp. Only assets
+// listed here are hedgeable.
+var hedgeBaseAssets = map[string]string{
+	"ETH": "ETH", "BTC": "BTC", "SOL": "SOL",
+	"ARB": "ARB", "OP": "OP", "AVAX": "AVAX",
+	"LINK": "LINK", "MATIC": "MATIC", "BNB": "BNB",
+	"VVV": "VVV", "VIRTUAL": "VIRTUAL",
+}
+
+// usdcPerps is the set of normalized assets that have a USDC-margined perpetual
+// listed on Binance. For these, the hedge defaults to the token/USDC contract;
+// everything else falls back to token/USDT.
+var usdcPerps = map[string]bool{
+	"ETH": true, "BTC": true, "SOL": true, "BNB": true,
+	"AVAX": true, "LINK": true, "ARB": true, "OP": true,
+}
+
+// HedgeQuotePreference controls the perp quote currency. "usdc" (the default)
+// hedges on the token/USDC contract when one exists and only falls back to
+// token/USDT when no USDC perp is listed; "usdt" forces the USDT contract. It is
+// set once at startup from the HEDGE_QUOTE env var.
+var HedgeQuotePreference = "usdc"
+
+// resolvePerp returns the Binance perp symbol used to hedge a normalized asset,
+// preferring the token/USDC contract per HedgeQuotePreference and falling back
+// to token/USDT when no USDC perp is available. ok is false for assets without
+// any listed perp.
+func resolvePerp(normAsset string) (symbol string, ok bool) {
+	base, has := hedgeBaseAssets[normAsset]
+	if !has {
+		return "", false
+	}
+	if !strings.EqualFold(HedgeQuotePreference, "usdt") && usdcPerps[normAsset] {
+		return base + "USDC", true
+	}
+	return base + "USDT", true
+}
+
+// perpForSymbol resolves the hedge perp for a (possibly wrapped/synthetic) pool
+// token symbol, normalizing it first so e.g. WETH/wstETH both map to the ETH
+// perp.
+func perpForSymbol(sym string) (string, bool) {
+	return resolvePerp(datasource.NormalizeSymbol(sym))
 }
 
 // stableSymbols are treated as non-volatile (no hedge needed for that leg).
@@ -188,8 +232,7 @@ func hedgeLegs(sym0, sym1 string, amt0, amt1 float64) []HedgeLeg {
 		if stableSymbols[strings.ToUpper(strings.TrimSpace(c.sym))] {
 			continue
 		}
-		norm := datasource.NormalizeSymbol(c.sym)
-		if perp, has := hedgeFutures[norm]; has {
+		if perp, has := resolvePerp(datasource.NormalizeSymbol(c.sym)); has {
 			legs = append(legs, HedgeLeg{
 				Asset:  c.sym,
 				Amount: c.amt,
