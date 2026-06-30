@@ -31,7 +31,7 @@ function view(p) {
     positionFeeApr: a.positionFeeApr,
     impliedVol: a.impliedVol,
     hasImplied: a.hasImplied,
-    rangeSim: a.rangeSim,
+    concentratedSim: a.concentratedSim,
   };
   if (m && m.ok) {
     return Object.assign(base, {
@@ -77,6 +77,15 @@ function volHeadroom(feeImpliedVol, realizedVol) {
 function expectedTimeInRange(k, T) {
   if (!k || k <= 0 || !T || T <= 0) return null;
   return k * k * T; // days
+}
+
+// bandSim returns the concentrated-APR projection for the currently selected
+// ±kσ band (the server computes bands "1" and "2"), or null when none was
+// attached (no vol signal / no fee flow).
+function bandSim(a, k) {
+  const cs = a.concentratedSim;
+  if (!cs || !cs.bands) return null;
+  return cs.bands[String(k)] || null;
 }
 
 // rangeBands returns the lognormal ±1σ and ±2σ containment bands for a sigma
@@ -910,11 +919,9 @@ function sortKey(p) {
       const b = rangeBands(a.realizedVol, state.horizonDays);
       return b ? (state.k === 2 ? b.up2 : b.up1) : -1;
     }
-    case "timeInRange": {
-      // k²·T is the same for every pool (σ cancels); kept so the column is
-      // clickable, but it does not reorder rows.
-      const t = expectedTimeInRange(state.k, state.horizonDays);
-      return t == null ? -Infinity : t;
+    case "estApr": {
+      const bs = bandSim(a, state.k);
+      return bs ? bs.apr : -Infinity;
     }
     case "netEdge":
       return a.netEdgeApr;
@@ -980,7 +987,8 @@ function renderTable() {
       const bandCell = b
         ? `<span class="ratio-pos">+${fmt.pct(up)}</span> / <span class="ratio-neg">-${fmt.pct(dn)}</span>`
         : "—";
-      const tirCell = fmt.duration(expectedTimeInRange(state.k, state.horizonDays));
+      const bs = bandSim(a, state.k);
+      const estCell = bs ? fmt.pct(bs.apr) : "—";
       const headroom = volHeadroom(a.feeImpliedVol, a.realizedVol);
       const headCls = (headroom || 0) >= 1 ? "ratio-pos" : "ratio-neg";
       const headCell = headroom == null ? "—" : headroom.toFixed(2) + "×";
@@ -994,7 +1002,7 @@ function renderTable() {
         <td class="num">${fmt.pct(a.realizedVol)}</td>
         <td class="num">${fmt.pct(a.feeImpliedVol)}</td>
         <td class="num">${bandCell}</td>
-        <td class="num">${tirCell}</td>
+        <td class="num">${estCell}</td>
         <td class="num ${edgeCls}">${fmt.pct(a.netEdgeApr)}</td>
         <td class="num ${headCls}">${headCell}</td>
         <td><span class="verdict ${a.verdict}">${a.verdict}</span></td>
@@ -1072,19 +1080,20 @@ function renderDetail(p) {
     unknown: "Not enough data to judge this pool.",
   }[a.verdict];
 
-  // Range simulation: the aggregator-style projected fee APR for a hypothetical
-  // deposit into a volatility-sized concentrated range (share of in-range
-  // liquidity). Only present when the server attached one.
-  const sim = a.rangeSim;
+  // Range simulation: estimated fee APR for a $1,000 deposit into the selected
+  // ±kσ band, as the deposit's share of the REAL in-range liquidity. Tracks the
+  // band chips (state.k) and shows whether it came from chain or an estimate.
+  const sim = bandSim(a, state.k);
+  const src = a.concentratedSim ? a.concentratedSim.source : null;
   const simHtml = sim
-    ? `<div class="bars-title" title="Projected fee APR for a deposit into a ±1σ (1-day) range, computed the way LP aggregators do: your share of the in-range liquidity. APR = volume·fee·365 / (active-in-range liquidity + deposit). Optimistic; swap fees only.">Range simulation · concentrated APR</div>
+    ? `<div class="bars-title" title="Estimated fee APR for a $1,000 deposit into the selected ±kσ band: the deposit's share of the in-range liquidity. share = Lyou/(Lexisting+Lyou); APR = volume·fee·365·share/deposit. On-chain liquidity where available.">Range simulation · est. APR for $1k (±${state.k}σ)${src ? ` · <span class="src ${src}">${src}</span>` : ""}</div>
        <div class="metric-grid">
-         <div class="metric"><div class="k">Projected APR</div><div class="v ratio-pos">${fmt.pct(sim.feeApr)}</div></div>
-         <div class="metric"><div class="k" title="Capital-efficiency multiplier of this range vs full-range.">Concentration</div><div class="v">${sim.concentrationX.toFixed(1)}×</div></div>
-         <div class="metric"><div class="k" title="Deposit size used for the projection.">On deposit</div><div class="v">${fmt.usd(sim.depositUsd)}</div></div>
+         <div class="metric"><div class="k">Est. APR</div><div class="v ratio-pos">${fmt.pct(sim.apr)}</div></div>
+         <div class="metric"><div class="k" title="Capital efficiency of this band vs full range.">Concentration</div><div class="v">${sim.concentrationX.toFixed(1)}×</div></div>
+         <div class="metric"><div class="k">On deposit</div><div class="v">${fmt.usd(a.concentratedSim ? a.concentratedSim.depositUsd : 1000)}</div></div>
          <div class="metric"><div class="k">Est. fees / day</div><div class="v">${fmt.usd(sim.dailyFeesUsd)}</div></div>
        </div>
-       <p class="hint" style="margin:6px 0 0">Range ${fmt.price(sim.lowerPrice)} – ${fmt.price(sim.upperPrice)} · active in-range liquidity ≈ ${fmt.usd(sim.activeLiquidityUsd)}</p>`
+       <p class="hint" style="margin:6px 0 0">Range ${fmt.price(sim.lowerPrice)} – ${fmt.price(sim.upperPrice)} · competing in-range liquidity ≈ ${fmt.usd(sim.activeLiquidityUsd)} · your share ≈ ${fmt.pct(sim.share)}</p>`
     : "";
 
   content.innerHTML = `

@@ -195,43 +195,72 @@ helpers) are unit-tested in `concentrated_test.go`: the breakeven equals the
 fee-implied σ, the headroom equals `√` of the old fee/vol ratio, and the
 time-in-range equals `k²·T` and is invariant to σ.
 
-### Range-based liquidity APR for simulations — `internal/analyzer/rangeapr.go`
+### Concentrated-APR projection from REAL on-chain liquidity — `internal/onchain`, `internal/analyzer/concentratedsim.go`
 
 The full-range `feeAPR = volume·feeTier/TVL·365` understates what a
 **concentrated** position earns, because a tight range puts the same dollar to
-work as more liquidity at the current price. The simulation projects the fee APR
-the way **official LP aggregators** (Revert, Krystal, Uniswap's position UI) do
-— by the share of the **in-range liquidity** a deposit would capture:
+work as more liquidity at the current price. The dashboard's **Est. APR ($1k)**
+column projects the fee APR a deposit would earn the way **official LP
+aggregators** (Revert, Krystal, Uniswap's position UI) do — by the deposit's
+**share of the real in-range liquidity**, read straight from chain.
+
+For a deposit of `$1,000` into a `±k·σ` band (`δ = k·σ·√(T/365)`, `T =
+DefaultHorizonDays`) around the current price:
 
 ```
-annualFees   = volume24h · feeTier · 365
-yourShare    = deposit / (activeLiquidityInRange + deposit)
-projectedAPR = annualFees · yourShare / deposit
-             = volume24h · feeTier · 365 / (activeLiquidityInRange + deposit)
+priceNow   = v3math.PriceAtTick(tickNow, dec0, dec1)         // exact, from chain
+[lo, hi]   = priceNow · e^∓δ  →  tickLower, tickUpper          // via v3math.TickAtPrice
+amt0, amt1 = v3math.GetAmountsForLiquidity(sqrtPriceX96, tickLower, tickUpper, Lunit)
+usdPerL    = (amt0/10^dec0 · price0USD + amt1/10^dec1 · price1USD) / Lunit
+Lyou       = deposit / usdPerL                                 // your position, raw L units
+Lexisting  = pool.liquidity()                                  // REAL active L at the tick
+share      = Lyou / (Lexisting + Lyou)
+annualFees = volume24h · feeTier · 365
+APR        = annualFees · share / deposit
 ```
 
-As `deposit → 0` this is the **marginal** APR; for a real deposit it
-**self-dilutes**, exactly as adding liquidity dilutes the pool. The active
-in-range liquidity is estimated from the pool's TVL via the same concentration
-factor `C(δ) = 1/(1 − e^{−δ/2})` used throughout the model:
+This is **bounded** (`share ≤ 1`, so the old "28,000% on cbBTC/WETH" blow-up
+cannot happen), grounded in the pool's actual liquidity, and **responds to the
+band**: a tighter band lowers `usdPerL`, so `Lyou` and the share — and the APR —
+rise, all capped by the real `Lexisting`. The token USD prices are aligned to the
+on-chain token0/token1 ordering via the current ratio price. The projection is
+computed for the bands the UI exposes (`k = 1` and `k = 2`) and the dashboard
+column/detail panel track the selected ±kσ chip.
+
+**On-chain reads** (`internal/onchain`) use per-chain Alchemy RPC clients
+(`pool.Slot0`, `pool.Liquidity`, `pool.TickSpacing`, `token0/1` + decimals), the
+same bindings as the position reader, cached per pool for the scan interval
+(decimals cached forever). Only canonical Uniswap-V3-style pools are read:
+**`uniswap_v3`**, **Aerodrome CL / Slipstream**, **`pancakeswap_v3`** (and
+Velodrome CL). Algebra forks (Camelot/Thena/QuickSwap v3 — `globalState`), v2 and
+Uniswap v4 (singleton) are **not** supported and use the fallback.
+
+**RPC config** (env, all optional): `RPC_BASE` (falls back to `RPC_URL`, the
+hedge side's Base endpoint), `RPC_ARBITRUM`, `RPC_ETH`, `RPC_OPTIMISM`,
+`RPC_POLYGON`, `RPC_BSC`, `RPC_AVALANCHE`. Chains without a client are not probed.
+`MAX_PROBE_POOLS` (default `60`) caps how many pools per scan are probed on chain;
+the **highest-ranked** pools are probed first, the rest use the fallback.
+
+**Fallback** (no RPC, unsupported DEX, a probe error, or the cap exceeded): a
+bounded pool-data-only estimate anchored so that at `k = 1` it equals the pool's
+full-range fee APR, tagged `estimated` (vs `onchain`) and badged in the UI:
 
 ```
-activeLiquidityInRange = TVL / C(δ)
+activeUSD = TVL · C(pool ±1σ band) / C(your ±kσ band)
+APR       = annualFees / (activeUSD + deposit)
 ```
 
-so the marginal APR equals `fullRangeAPR · C(δ)` — the familiar capital-efficiency
-boost — and recovers the full-range APR as the range widens (`C → 1`,
-`active → TVL`). The per-pool simulation (`Result.RangeSim`, served to the
-dashboard) sizes the range by **each pool's own realised volatility** — a ±1σ
-(1-day) containment band (`SimulateVolRange`, reusing `LogHalfWidth` from
-`ranges.go`) — so the range adapts per pool rather than being a fixed width, and
-the projected APR reflects the concentration that range affords. It needs **no
-on-chain tick data** (TVL + volume + fee tier + the band), and like the breakeven
-σ it is **optimistic** (assumes the pool is no more concentrated than full-range,
-and counts swap fees only). The functions are unit-tested in
-[`rangeapr_test.go`](internal/analyzer/rangeapr_test.go): the marginal APR equals
-`fullRangeAPR · C`, active liquidity shrinks with the range, and a deposit equal
-to the active liquidity halves the APR.
+with `C(δ) = 1/(1 − e^{−δ/2})`. At `k = 1` the two `C` cancel and `activeUSD = TVL`,
+so `APR ≈ volume·feeTier·365/TVL` (the pool fee APR); a wider band earns less.
+The model (`ConcentratedProjection`, injected with the `onchain.Prober`
+interface) is unit-tested with both a fake prober and `NoopProber` —
+`APR = annualFees·share/deposit`, `share ≤ 1`, `k=1 APR > k=2 APR`, and the
+fallback equals the pool fee APR at `k = 1` — with **no live RPC in tests**.
+`v3math.TickAtPrice` round-trips with `PriceAtTick`.
+
+> ⚠️ Still **optimistic** and swap-fees-only: it uses the **current-tick**
+> `liquidity()` as the competing liquidity for the whole band (no tick-bitmap
+> walk yet) and excludes farm/gauge incentives (e.g. AERO emissions).
 
 ### Junk-pool filter (scanner) — `internal/scanner`
 
@@ -385,6 +414,7 @@ internal/datasource pool/price providers behind a common interface:
                       - deribit.go        options-implied vol (DVOL)
                       - demo.go           synthetic data (offline/CI)
 internal/lp         on-chain Aerodrome position reader (Uniswap V3-style)
+internal/onchain    on-chain v3 pool state probe (active liquidity) via Alchemy RPC
 internal/binance    Binance futures read + short sync
 internal/api        JSON API + static file serving
 web/assets          dashboard (HTML/CSS/JS, embedded via go:embed)
@@ -420,12 +450,14 @@ DATA_SOURCE=live SCAN_INTERVAL=10m go run ./cmd/server
 | `POOLS_PER_CHAIN` | `8` | pools kept per chain |
 | `MIN_TVL_USD` | `50000` | drop pools with reserves below this (junk filter) |
 | `MAX_TURNOVER` | `20` | drop pools with 24h-volume/TVL above this (wash-trade filter) |
+| `MAX_PROBE_POOLS` | `60` | per-scan cap on pools probed on chain for real active liquidity (highest-ranked first) |
 | `CHAINS` | built-in set | comma-separated slugs, e.g. `eth,base,arbitrum` |
 | `TRACK_TOKEN_IDS` | `71002035` | comma-separated Aerodrome position token IDs to track and aggregate |
 | `TRACK_TOKEN_ID` | — | legacy single-id form, still honoured |
 | `HEDGE_QUOTE` | `usdc` | perp quote currency: `usdc` (prefer token/USDC, fall back to token/USDT) or `usdt` |
 | `HEDGE_DRY_RUN` | `true` | `false` lets `cmd/hedge` actually place orders |
-| `RPC_URL` | — | Base RPC (required for **live** position tracking) |
+| `RPC_URL` | — | Base RPC (required for **live** position tracking; also the default `RPC_BASE` for on-chain probing) |
+| `RPC_BASE` / `RPC_ARBITRUM` / `RPC_ETH` / `RPC_OPTIMISM` / `RPC_POLYGON` / `RPC_BSC` / `RPC_AVALANCHE` | — | per-chain RPC endpoints for the on-chain active-liquidity probe (concentrated APR) |
 | `BINANCE_TESTNET_API_KEY` / `_SECRET` | — | optional; enables live hedge read |
 | `GECKOTERMINAL_URL` | public API | override base URL (proxy) |
 | `DERIBIT_URL` | public API | override base URL (proxy) |

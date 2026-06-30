@@ -16,6 +16,33 @@ func PriceAtTick(tick int64, dec0, dec1 uint8) float64 {
 	return math.Pow(1.0001, float64(tick)) * math.Pow(10, float64(int(dec0)-int(dec1)))
 }
 
+// TickAtPrice is the inverse of PriceAtTick: the tick whose price is nearest to
+// the given human-readable price (token1 per token0), given the token decimals.
+//
+// Inverting price = 1.0001^tick * 10^(dec0-dec1):
+//
+//	tick = log_1.0001( price / 10^(dec0-dec1) )
+//
+// The result is rounded to the nearest integer tick and clamped to the valid
+// tick range. Display/estimation only — no network or chain access.
+func TickAtPrice(price float64, dec0, dec1 uint8) int64 {
+	if price <= 0 {
+		return 0
+	}
+	adj := price / math.Pow(10, float64(int(dec0)-int(dec1)))
+	if adj <= 0 {
+		return 0
+	}
+	tick := math.Round(math.Log(adj) / math.Log(1.0001))
+	if tick < MinTick {
+		return MinTick
+	}
+	if tick > MaxTick {
+		return MaxTick
+	}
+	return int64(tick)
+}
+
 // RangeInfo describes a position's range in notional prices plus where the
 // current price sits within it.
 type RangeInfo struct {

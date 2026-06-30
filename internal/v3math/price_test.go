@@ -27,6 +27,33 @@ func TestPriceAtTick(t *testing.T) {
 	}
 }
 
+// TestTickAtPriceRoundTrips checks TickAtPrice inverts PriceAtTick to within the
+// rounding of one tick, across decimal layouts and signs.
+func TestTickAtPriceRoundTrips(t *testing.T) {
+	cases := []struct {
+		tick       int64
+		dec0, dec1 uint8
+	}{
+		{0, 18, 18},
+		{-200000, 18, 6},  // WETH/USDC
+		{200000, 6, 18},   // reversed decimals
+		{-2000, 18, 18},   // wstETH/WETH-ish
+		{123456, 8, 18},   // cbBTC/WETH-ish
+		{-887000, 18, 18}, // near min
+	}
+	for _, c := range cases {
+		price := PriceAtTick(c.tick, c.dec0, c.dec1)
+		got := TickAtPrice(price, c.dec0, c.dec1)
+		if d := got - c.tick; d < -1 || d > 1 {
+			t.Fatalf("TickAtPrice(PriceAtTick(%d)) = %d, want within ±1", c.tick, got)
+		}
+	}
+	// Non-positive price is handled, not panicking.
+	if TickAtPrice(0, 18, 18) != 0 {
+		t.Fatal("TickAtPrice(0) should be 0")
+	}
+}
+
 // TestRangePricesWithin checks the within-range reads 0% at the lower tick and
 // 100% at the upper tick, and matches hand-computed endpoint prices. No network.
 func TestRangePricesWithin(t *testing.T) {
