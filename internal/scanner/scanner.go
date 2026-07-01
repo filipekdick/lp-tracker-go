@@ -14,6 +14,7 @@ import (
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/onchain"
 	"github.com/filipekdick/lp-tracker-go/internal/position"
 )
 
@@ -30,6 +31,12 @@ type Config struct {
 	// which otherwise produces impossible fee APRs). Zero disables a filter.
 	MinTVLUSD   float64
 	MaxTurnover float64
+
+	// MaxProbePools caps how many pools per scan are probed on chain for their
+	// real active liquidity (the concentrated-APR projection). The highest-ranked
+	// pools are probed first; the rest use the bounded pool-data estimate. Zero
+	// disables on-chain probing.
+	MaxProbePools int
 }
 
 // DefaultMinTVLUSD and DefaultMaxTurnover are the filter defaults when the env
@@ -80,6 +87,7 @@ type Scanner struct {
 	source  datasource.Source
 	implied datasource.ImpliedVolSource
 	tracker position.Tracker
+	prober  onchain.Prober
 
 	mu   sync.RWMutex
 	snap Snapshot
@@ -89,8 +97,13 @@ type Scanner struct {
 }
 
 // New builds a Scanner. implied may be nil to skip options-implied volatility,
-// and tracker may be nil to disable single-position tracking.
-func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSource, tracker position.Tracker) *Scanner {
+// tracker may be nil to disable single-position tracking, and prober may be nil
+// (or a onchain.NoopProber) to disable on-chain liquidity probing — pools then
+// use the bounded pool-data estimate for their concentrated-APR projection.
+func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSource, tracker position.Tracker, prober onchain.Prober) *Scanner {
+	if prober == nil {
+		prober = onchain.NoopProber{}
+	}
 	if cfg.PerChain <= 0 {
 		cfg.PerChain = 10
 	}
@@ -108,6 +121,7 @@ func New(cfg Config, source datasource.Source, implied datasource.ImpliedVolSour
 		source:  source,
 		implied: implied,
 		tracker: tracker,
+		prober:  prober,
 		snap:    Snapshot{Source: source.Name()},
 		trigger: make(chan struct{}, 1),
 	}
@@ -204,6 +218,10 @@ func (s *Scanner) scanPools(ctx context.Context) {
 	s.failedChains = nil
 	s.mu.Unlock()
 
+	// One on-chain probe budget for the whole scan; top-ranked pools per chain
+	// consume it first.
+	probeBudget := s.cfg.MaxProbePools
+
 	for _, chain := range s.cfg.Chains {
 		if ctx.Err() != nil {
 			s.setScanning(false)
@@ -226,7 +244,7 @@ func (s *Scanner) scanPools(ctx context.Context) {
 			continue
 		}
 
-		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover))
+		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover), &probeBudget)
 
 		s.mu.Lock()
 		// Merge results progressively
@@ -291,6 +309,7 @@ func (s *Scanner) retryFailed(ctx context.Context) {
 	log.Printf("[scanner] retrying failed chains: %s", formatChainSlugs(failed))
 
 	var stillFailed []datasource.Chain
+	probeBudget := s.cfg.MaxProbePools
 
 	for _, chain := range failed {
 		if ctx.Err() != nil {
@@ -311,7 +330,7 @@ func (s *Scanner) retryFailed(ctx context.Context) {
 			continue
 		}
 
-		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover))
+		newAnalyzed := s.analyze(ctx, filterPools(raw, s.cfg.MinTVLUSD, s.cfg.MaxTurnover), &probeBudget)
 
 		s.mu.Lock()
 		var merged []AnalyzedPool
@@ -373,9 +392,11 @@ func (s *Scanner) trackPosition(ctx context.Context) *position.TrackedPosition {
 	return &tp
 }
 
-// analyze runs the model over every raw pool and returns the results sorted by
-// score (most attractive first).
-func (s *Scanner) analyze(ctx context.Context, raw []datasource.RawPool) []AnalyzedPool {
+// analyze runs the model over every raw pool, sorts the results by score (most
+// attractive first), and attaches the concentrated-APR projection — probing the
+// highest-ranked pools on chain for their real active liquidity until the
+// per-scan budget is spent, with the rest using the bounded pool-data estimate.
+func (s *Scanner) analyze(ctx context.Context, raw []datasource.RawPool, probeBudget *int) []AnalyzedPool {
 	pools := make([]AnalyzedPool, 0, len(raw))
 	for _, rp := range raw {
 		in := analyzer.Input{
@@ -398,6 +419,30 @@ func (s *Scanner) analyze(ctx context.Context, raw []datasource.RawPool) []Analy
 	sort.SliceStable(pools, func(i, j int) bool {
 		return pools[i].Analysis.Score > pools[j].Analysis.Score
 	})
+
+	// Attach the concentrated-APR projection, top-ranked first so the limited
+	// on-chain probe budget goes to the most attractive pools.
+	for i := range pools {
+		rp := pools[i].RawPool
+		allowProbe := probeBudget != nil && *probeBudget > 0
+		sim := analyzer.ConcentratedProjection(ctx, s.prober, analyzer.ConcentratedInput{
+			ChainSlug:    rp.ChainSlug,
+			PoolAddress:  rp.Address,
+			DEX:          rp.DEX,
+			FeeTier:      rp.FeeTier,
+			TVLUSD:       rp.TVLUSD,
+			Volume24hUSD: rp.Volume24hUSD,
+			RealizedVol:  pools[i].Analysis.RealizedVol,
+			BaseUSD:      rp.PriceUSD,
+			QuoteUSD:     rp.QuotePriceUSD,
+		}, allowProbe)
+		if sim != nil {
+			pools[i].Analysis.ConcentratedSim = sim
+			if sim.Source == "onchain" && probeBudget != nil {
+				*probeBudget--
+			}
+		}
+	}
 	return pools
 }
 

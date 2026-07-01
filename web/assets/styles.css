@@ -162,6 +162,11 @@ button:hover { background: #232c3d; border-color: #33405a; }
 .pill.sync { color: var(--green); border-color: #1f5e2c; }
 .pill.drift { color: var(--amber); border-color: #5e4a1f; }
 
+/* concentrated-APR source badge: on-chain (real liquidity) vs estimated */
+.src { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: .03em; }
+.src.onchain { color: var(--green); border-color: #1f5e2c; }
+.src.estimated { color: var(--amber); border-color: #5e4a1f; }
+
 .section-title { margin: 22px 24px 0; font-size: 16px; }
 
 /* ---- controls ---- */

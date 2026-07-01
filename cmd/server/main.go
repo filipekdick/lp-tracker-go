@@ -36,6 +36,7 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 	"github.com/filipekdick/lp-tracker-go/internal/lp"
+	"github.com/filipekdick/lp-tracker-go/internal/onchain"
 	"github.com/filipekdick/lp-tracker-go/internal/position"
 	"github.com/filipekdick/lp-tracker-go/internal/scanner"
 	"github.com/filipekdick/lp-tracker-go/web"
@@ -51,6 +52,7 @@ func main() {
 		PositionInterval: envDuration("POSITION_INTERVAL", 3*time.Minute),
 		MinTVLUSD:        envFloat("MIN_TVL_USD", scanner.DefaultMinTVLUSD),
 		MaxTurnover:      envFloat("MAX_TURNOVER", scanner.DefaultMaxTurnover),
+		MaxProbePools:    envInt("MAX_PROBE_POOLS", 60),
 	}
 
 	// Hedge quote preference: token/USDC by default, token/USDT only as a
@@ -67,7 +69,8 @@ func main() {
 		log.Printf("position tracking: %s | token IDs %v | hedge quote: %s", tracker.Name(), ids, position.HedgeQuotePreference)
 	}
 
-	sc := scanner.New(cfg, source, implied, tracker)
+	prober := buildProber(cfg.Interval)
+	sc := scanner.New(cfg, source, implied, tracker, prober)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -194,6 +197,49 @@ func trackTokenIDs() []int64 {
 		return []int64{defaultTokenID}
 	}
 	return ids
+}
+
+// buildProber dials the per-chain RPC endpoints configured via env vars and
+// returns an on-chain liquidity prober. Chains without a configured RPC are
+// simply not probed (their pools use the bounded pool-data estimate). The Base
+// RPC reuses RPC_URL (the hedge side's endpoint) when RPC_BASE is unset. ttl
+// bounds how long a pool's state is cached.
+func buildProber(ttl time.Duration) onchain.Prober {
+	// env var -> datasource chain slug
+	chainEnv := map[string]string{
+		"RPC_BASE":      "base",
+		"RPC_ARBITRUM":  "arbitrum",
+		"RPC_ETH":       "eth",
+		"RPC_OPTIMISM":  "optimism",
+		"RPC_POLYGON":   "polygon_pos",
+		"RPC_BSC":       "bsc",
+		"RPC_AVALANCHE": "avax",
+	}
+	// Reuse the hedge side's Base RPC when a dedicated RPC_BASE isn't set.
+	if os.Getenv("RPC_BASE") == "" && os.Getenv("RPC_URL") != "" {
+		_ = os.Setenv("RPC_BASE", os.Getenv("RPC_URL"))
+	}
+
+	clients := map[string]*ethclient.Client{}
+	for env, slug := range chainEnv {
+		url := os.Getenv(env)
+		if url == "" {
+			continue
+		}
+		client, err := ethclient.Dial(url)
+		if err != nil {
+			log.Printf("on-chain probe: could not dial %s (%s): %v", slug, env, err)
+			continue
+		}
+		clients[slug] = client
+	}
+	if len(clients) == 0 {
+		log.Println("on-chain probe: no RPC endpoints configured — concentrated APR uses pool-data estimate (set RPC_BASE/RPC_ARBITRUM/...)")
+		return onchain.NoopProber{}
+	}
+	prober := onchain.NewRPCProber(clients, ttl)
+	log.Printf("on-chain probe: active for chains %v (cache TTL %s)", prober.Chains(), ttl)
+	return prober
 }
 
 // resolveChains maps a comma-separated slug list onto the known chain set,

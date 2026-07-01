@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/onchain"
 	"github.com/filipekdick/lp-tracker-go/internal/position"
 	"github.com/filipekdick/lp-tracker-go/internal/scanner"
 )
@@ -27,6 +28,7 @@ func TestIntegrationSmokeDemo(t *testing.T) {
 		datasource.NewDemo(1),
 		datasource.DemoImpliedVol{},
 		position.NewDemoTracker(1),
+		onchain.NoopProber{},
 	)
 	go sc.Run(ctx)
 
