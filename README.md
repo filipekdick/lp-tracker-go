@@ -297,7 +297,14 @@ drift                  = target short − current short
 
 ### Multiple positions → one simplified short per asset
 
-`TRACK_TOKEN_IDS` lists every LP position to track. A wallet usually holds the
+`TRACK_TOKEN_IDS` seeds the LP positions to track at startup, but the set is
+**editable at runtime** from the dashboard: the **✎ Edit tracked** button in the
+tracked-positions header takes a comma-separated list of token IDs (one or many),
+POSTs it to `/api/tracked`, and the portfolio + single aggregated hedge update on
+the next poll — no restart. Changing the set resets the strategy inception
+baseline so PnL restarts cleanly for the new portfolio.
+
+A wallet usually holds the
 **same** underlying exposure spread across many positions — ETH in a WETH/USDC
 pool, more ETH in a wstETH/WETH pool, more in a cbETH/USDC pool. The tracker
 reads each position on chain and **sums the volatile-leg units by their
@@ -474,6 +481,8 @@ Default chains span L1s (Ethereum, BNB Chain, Solana, Avalanche) and L2s
 | GET | `/api/pools` | all analyzed pools (filters: `?chainKind=L1\|L2`, `?chain=base`, `?verdict=attractive`) |
 | GET | `/api/pools/{chain}/{address}` | single pool detail |
 | GET | `/api/position` | the tracked LP position + hedge |
+| GET | `/api/tracked` | the LP position token IDs currently tracked |
+| POST | `/api/tracked` | replace the tracked token IDs at runtime (body: `{"tokenIds":[…]}` or `"1,2,3"`) |
 | POST | `/api/scan` | trigger an immediate scan |
 
 ## Tests

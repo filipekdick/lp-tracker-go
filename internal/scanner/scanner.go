@@ -291,6 +291,27 @@ func (s *Scanner) CancelOrder(ctx context.Context, symbol string, orderID int64)
 	return s.tracker.CancelOrder(ctx, symbol, orderID)
 }
 
+// TrackedTokenIDs returns the LP position token IDs currently tracked, or nil
+// when no tracker is configured.
+func (s *Scanner) TrackedTokenIDs() []int64 {
+	if s.tracker == nil {
+		return nil
+	}
+	return s.tracker.TokenIDs()
+}
+
+// SetTrackedTokenIDs replaces the tracked LP positions at runtime and refreshes
+// the position immediately so the dashboard reflects the change on the next poll
+// without waiting a full interval. It returns the resulting tracked set.
+func (s *Scanner) SetTrackedTokenIDs(ctx context.Context, ids []int64) ([]int64, error) {
+	if s.tracker == nil {
+		return nil, fmt.Errorf("no position tracker configured")
+	}
+	s.tracker.SetTokenIDs(ids)
+	s.refreshPosition(ctx)
+	return s.tracker.TokenIDs(), nil
+}
+
 func (s *Scanner) retryFailed(ctx context.Context) {
 	s.mu.Lock()
 	failed := make([]datasource.Chain, len(s.failedChains))

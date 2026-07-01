@@ -35,10 +35,13 @@ type LiveTracker struct {
 	pricer   poolPricer
 	iv       datasource.ImpliedVolSource
 	bn       *binance.Client
-	tokenIDs []int64
 	chain    datasource.Chain
 	dryRun   bool
 	strategy *hedger.Strategy
+
+	// idsMu guards tokenIDs, which the dashboard can change at runtime.
+	idsMu    sync.RWMutex
+	tokenIDs []int64
 
 	mu           sync.Mutex
 	initialState *Snapshot
@@ -77,6 +80,33 @@ func NewLiveTracker(
 
 func (t *LiveTracker) Name() string { return "live" }
 
+// TokenIDs returns the currently tracked LP position token IDs.
+func (t *LiveTracker) TokenIDs() []int64 {
+	t.idsMu.RLock()
+	defer t.idsMu.RUnlock()
+	return append([]int64(nil), t.tokenIDs...)
+}
+
+// SetTokenIDs replaces the tracked positions at runtime. Because the portfolio
+// composition changes, the inception baseline, history and per-position fee
+// ledgers are reset so the strategy PnL restarts cleanly for the new set.
+// Empty/invalid input is ignored so tracking is never accidentally wiped.
+func (t *LiveTracker) SetTokenIDs(ids []int64) {
+	clean := dedupePositive(ids)
+	if len(clean) == 0 {
+		return
+	}
+	t.idsMu.Lock()
+	t.tokenIDs = clean
+	t.idsMu.Unlock()
+
+	t.mu.Lock()
+	t.initialState = nil
+	t.history = nil
+	t.feeLedgers = map[int64]*FeeLedger{}
+	t.mu.Unlock()
+}
+
 // trackedLeg bundles one position's on-chain report and priced pool so the
 // aggregation, valuation and fee ledger can all reuse a single read.
 type trackedLeg struct {
@@ -92,13 +122,14 @@ type trackedLeg struct {
 // Track reads every tracked position, aggregates the exposure across them and
 // reports a single simplified hedge per asset.
 func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
-	if len(t.tokenIDs) == 0 {
+	tokenIDs := t.TokenIDs()
+	if len(tokenIDs) == 0 {
 		return TrackedPosition{}, fmt.Errorf("no token IDs configured to track")
 	}
 
 	var legs []trackedLeg
 	var firstErr error
-	for _, id := range t.tokenIDs {
+	for _, id := range tokenIDs {
 		report, err := t.reader.ReadPosition(id)
 		if err != nil {
 			if firstErr == nil {

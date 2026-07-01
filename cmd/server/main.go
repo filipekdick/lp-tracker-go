@@ -133,20 +133,20 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource)
 	tokenIDs := trackTokenIDs()
 
 	if strings.ToLower(envStr("DATA_SOURCE", "demo")) != "live" {
-		return position.NewDemoTracker(tokenIDs[0])
+		return position.NewDemoTracker(tokenIDs...)
 	}
 
 	rpcURL := os.Getenv("RPC_URL")
 	gecko, okGecko := source.(*datasource.GeckoTerminal)
 	if rpcURL == "" || !okGecko {
 		log.Println("live position tracking needs RPC_URL and the live data source; using demo tracker")
-		return position.NewDemoTracker(tokenIDs[0])
+		return position.NewDemoTracker(tokenIDs...)
 	}
 
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		log.Printf("could not dial RPC for position tracking (%v); using demo tracker", err)
-		return position.NewDemoTracker(tokenIDs[0])
+		return position.NewDemoTracker(tokenIDs...)
 	}
 
 	nfpmAddr := envStr("NFPM_ADDRESS", "0x827922686190790b37229fd06084350E74485b72")

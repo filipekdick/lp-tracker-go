@@ -33,8 +33,18 @@
 
   <section class="tracked" id="tracked" hidden>
     <div class="tracked-head">
-      <h2>Tracked position &amp; hedge</h2>
+      <h2>Tracked positions &amp; hedge</h2>
       <span class="tracked-sub" id="tracked-sub"></span>
+      <button id="edit-tracked" class="edit-btn" title="Add or remove the LP position token IDs being tracked">✎ Edit tracked</button>
+    </div>
+    <div class="tracked-editor" id="tracked-editor" hidden>
+      <label for="tracked-input">LP position token IDs (comma-separated — track one or many):</label>
+      <div class="tracked-editor-row">
+        <input type="text" id="tracked-input" inputmode="numeric" placeholder="e.g. 71002035, 71002099, 71003120" autocomplete="off" />
+        <button id="tracked-save" class="btn-primary">Save</button>
+        <button id="tracked-cancel" class="btn-ghost">Cancel</button>
+      </div>
+      <span class="tracked-editor-msg" id="tracked-editor-msg"></span>
     </div>
     <div class="pcards" id="position-summary"></div>
     <div class="tracked-grid" id="tracked-grid"></div>

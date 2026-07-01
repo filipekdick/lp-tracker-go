@@ -1245,6 +1245,86 @@ function wireControls() {
       e.target.textContent = "Scan now";
     }, 1500);
   });
+
+  wireTrackedEditor();
+}
+
+// wireTrackedEditor lets the user change which LP position token IDs are tracked,
+// and add multiple, from the dashboard. It POSTs the comma-separated list to
+// /api/tracked and refreshes so the new portfolio and its single aggregated
+// hedge appear.
+function wireTrackedEditor() {
+  const editor = document.getElementById("tracked-editor");
+  const input = document.getElementById("tracked-input");
+  const msg = document.getElementById("tracked-editor-msg");
+  const editBtn = document.getElementById("edit-tracked");
+  if (!editor || !input || !editBtn) return;
+
+  const close = () => {
+    editor.hidden = true;
+    msg.textContent = "";
+  };
+  const open = async () => {
+    msg.textContent = "";
+    editor.hidden = false;
+    // Prefill with the authoritative tracked set from the server (falls back to
+    // the IDs visible on the current position payload).
+    let ids = [];
+    try {
+      const resp = await getJSON("/api/tracked");
+      ids = resp.tokenIds || [];
+    } catch (_) {
+      const p = state.position;
+      if (p) ids = (p.positions || []).map((x) => x.tokenId);
+      if (!ids.length && p && p.tokenId) ids = [p.tokenId];
+    }
+    input.value = ids.join(", ");
+    input.focus();
+    input.select();
+  };
+
+  const save = async () => {
+    const raw = input.value.trim();
+    const ids = (raw.match(/\d+/g) || []).map((n) => parseInt(n, 10));
+    if (!ids.length) {
+      msg.textContent = "Enter at least one token ID.";
+      msg.className = "tracked-editor-msg err";
+      return;
+    }
+    const saveBtn = document.getElementById("tracked-save");
+    saveBtn.disabled = true;
+    msg.textContent = "Saving…";
+    msg.className = "tracked-editor-msg";
+    try {
+      const r = await fetch("/api/tracked", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tokenIds: ids }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      msg.textContent =
+        "Now tracking " + (data.tokenIds || []).length + " position(s).";
+      close();
+      await refresh();
+    } catch (e) {
+      msg.textContent = "Failed: " + e;
+      msg.className = "tracked-editor-msg err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  };
+
+  editBtn.addEventListener("click", () => {
+    if (editor.hidden) open();
+    else close();
+  });
+  document.getElementById("tracked-save").addEventListener("click", save);
+  document.getElementById("tracked-cancel").addEventListener("click", close);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") save();
+    else if (e.key === "Escape") close();
+  });
 }
 
 function setActive(group, btn) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
@@ -11,19 +12,50 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 )
 
-// DemoTracker synthesises a realistic Aerodrome WETH/USDC position on Base,
-// complete with a Binance perp short hedge, so the dashboard runs offline.
+// defaultDemoTokenID is used when a demo tracker is built with no IDs.
+const defaultDemoTokenID = 71002035
+
+// DemoTracker synthesises a realistic Aerodrome portfolio on Base — one
+// ETH-family position per tracked token ID, all folding into a single ETH perp
+// short — so the dashboard runs offline. The tracked set is mutable at runtime
+// (SetTokenIDs), so the frontend's "edit tracked positions" button works in demo
+// mode too.
 type DemoTracker struct {
-	tokenID int64
-	iv      datasource.ImpliedVolSource
+	mu       sync.Mutex
+	tokenIDs []int64
+	iv       datasource.ImpliedVolSource
 }
 
-// NewDemoTracker builds a demo tracker for the given token ID.
-func NewDemoTracker(tokenID int64) *DemoTracker {
-	return &DemoTracker{tokenID: tokenID, iv: datasource.DemoImpliedVol{}}
+// NewDemoTracker builds a demo tracker for the given token IDs (one synthetic
+// position each). With no IDs it falls back to the built-in default.
+func NewDemoTracker(tokenIDs ...int64) *DemoTracker {
+	ids := dedupePositive(tokenIDs)
+	if len(ids) == 0 {
+		ids = []int64{defaultDemoTokenID}
+	}
+	return &DemoTracker{tokenIDs: ids, iv: datasource.DemoImpliedVol{}}
 }
 
 func (t *DemoTracker) Name() string { return "demo" }
+
+// TokenIDs returns the currently tracked token IDs.
+func (t *DemoTracker) TokenIDs() []int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]int64(nil), t.tokenIDs...)
+}
+
+// SetTokenIDs replaces the tracked token IDs (invalid/duplicate/non-positive
+// entries are dropped). An empty result falls back to the built-in default.
+func (t *DemoTracker) SetTokenIDs(ids []int64) {
+	clean := dedupePositive(ids)
+	if len(clean) == 0 {
+		clean = []int64{defaultDemoTokenID}
+	}
+	t.mu.Lock()
+	t.tokenIDs = clean
+	t.mu.Unlock()
+}
 
 // Track returns a synthetic but internally-consistent tracked position. The
 // price history is regenerated each call (seeded by the clock) so the hedge
@@ -73,45 +105,68 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 
 	res := runAnalysis(ctx, rp, t.iv)
 
-	// A second synthetic position holding the SAME underlying (ETH) through a
-	// SYNTHETIC token — a wstETH/WETH pool — so the demo exercises the
-	// multi-position aggregation: both the WETH leg here and the wstETH + WETH
-	// legs there fold into one ETH short.
-	wstethAmount := 1.5 + rng.Float64()*0.8
-	weth2Amount := 0.8 + rng.Float64()*0.5
-	pos2Value := wstethAmount*mark + weth2Amount*mark
-
 	perp, _ := resolvePerp("ETH") // ETHUSDC by default (USDC-preferred)
 
+	// One synthetic position per tracked token ID, all ETH-family so they fold
+	// into a single aggregated ETH short. The first is the rich WETH/USDC position
+	// that drives the top-level cards and the history graph; the rest alternate
+	// between another WETH/USDC and a wstETH/WETH (synthetic ETH) pool, so adding
+	// token IDs from the frontend visibly grows the portfolio and the hedge.
+	ids := t.TokenIDs()
 	primaryLeg := PositionLeg{
-		TokenID: t.tokenID, Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
+		TokenID: ids[0], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
 		Protocol: rp.Protocol, DEX: rp.DEX, PoolAddress: rp.Address, PoolName: rp.Name,
 		Symbol0: "WETH", Symbol1: "USDC", Amount0: wethAmount, Amount1: usdcAmount,
 		TickLower: -201_400, TickUpper: -199_800, TickNow: -200_600, InRange: true,
 		Decimals0: 18, Decimals1: 6, ValueUSD: valueUSD, Price0: mark, Price1: 1,
 		FeeTier: rp.FeeTier, TVLUSD: rp.TVLUSD, Volume24hUSD: rp.Volume24hUSD, Analysis: res,
 	}
-	secondLeg := PositionLeg{
-		TokenID: t.tokenID + 1, Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
-		Protocol: "Aerodrome", DEX: "aerodrome_slipstream",
-		PoolAddress: "0x4d69971ccd4a636c403a3c1b00c85e99bb9b5606", PoolName: "wstETH / WETH",
-		Symbol0: "wstETH", Symbol1: "WETH", Amount0: wstethAmount, Amount1: weth2Amount,
-		TickLower: -2_000, TickUpper: 2_000, TickNow: 100, InRange: true,
-		Decimals0: 18, Decimals1: 18, ValueUSD: pos2Value, Price0: mark, Price1: mark,
-		FeeTier: 0.0001, TVLUSD: 9_000_000, Volume24hUSD: 4_000_000, Analysis: res,
+	positions := []PositionLeg{withRangePrices(primaryLeg)}
+	totalETH := wethAmount
+	totalValue := valueUSD
+	for i := 1; i < len(ids); i++ {
+		var leg PositionLeg
+		if i%2 == 1 {
+			// wstETH/WETH synthetic — ETH exposure via wstETH + WETH.
+			wst := 1.0 + rng.Float64()*1.2
+			w2 := 0.4 + rng.Float64()*0.8
+			leg = PositionLeg{
+				TokenID: ids[i], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
+				Protocol: "Aerodrome", DEX: "aerodrome_slipstream",
+				PoolAddress: "0x4d69971ccd4a636c403a3c1b00c85e99bb9b5606", PoolName: "wstETH / WETH",
+				Symbol0: "wstETH", Symbol1: "WETH", Amount0: wst, Amount1: w2,
+				TickLower: -2_000, TickUpper: 2_000, TickNow: 100, InRange: true,
+				Decimals0: 18, Decimals1: 18, ValueUSD: (wst + w2) * mark, Price0: mark, Price1: mark,
+				FeeTier: 0.0001, TVLUSD: 9_000_000, Volume24hUSD: 4_000_000, Analysis: res,
+			}
+			totalETH += wst + w2
+		} else {
+			// Another WETH/USDC position.
+			w := 1.0 + rng.Float64()*2.0
+			u := w * mark * (0.8 + rng.Float64()*0.3)
+			leg = PositionLeg{
+				TokenID: ids[i], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
+				Protocol: rp.Protocol, DEX: rp.DEX, PoolAddress: rp.Address, PoolName: rp.Name,
+				Symbol0: "WETH", Symbol1: "USDC", Amount0: w, Amount1: u,
+				TickLower: -202_000, TickUpper: -199_000, TickNow: -200_600, InRange: true,
+				Decimals0: 18, Decimals1: 6, ValueUSD: w*mark + u, Price0: mark, Price1: 1,
+				FeeTier: rp.FeeTier, TVLUSD: rp.TVLUSD, Volume24hUSD: rp.Volume24hUSD, Analysis: res,
+			}
+			totalETH += w
+		}
+		positions = append(positions, withRangePrices(leg))
+		totalValue += leg.ValueUSD
 	}
-	positions := []PositionLeg{withRangePrices(primaryLeg), withRangePrices(secondLeg)}
 	exposures := aggregateExposures(positions)
 
-	// Aggregate ETH exposure across both positions → a single simplified short,
+	// Aggregate ETH exposure across all positions → a single simplified short,
 	// deliberately a touch out of sync.
-	totalETH := wethAmount + wstethAmount + weth2Amount
 	current := totalETH - (0.05 + rng.Float64()*0.25)
 	hedge := buildHedge("WETH", perp, totalETH, current, entryPrice, mark, true, true,
 		"Binance Futures (testnet) · demo · "+sourcesNote(exposures[0]))
 
 	tp := TrackedPosition{
-		TokenID:     t.tokenID,
+		TokenID:     ids[0],
 		Chain:       rp.Chain,
 		ChainSlug:   rp.ChainSlug,
 		ChainKind:   rp.ChainKind,
@@ -134,7 +189,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		UncollectedFees1: 8 + rng.Float64()*6,
 		TokensOwed0:      0.0042 + rng.Float64()*0.002,
 		TokensOwed1:      8 + rng.Float64()*6,
-		ValueUSD:         valueUSD,
+		ValueUSD:         totalValue,
 		Price0:           mark,
 		Price1:           1,
 		FeeTier:          rp.FeeTier,

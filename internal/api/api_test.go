@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,82 @@ func num(t *testing.T, m map[string]any, key string) float64 {
 		t.Fatalf("missing/invalid numeric field %q", key)
 	}
 	return v
+}
+
+// TestTrackedEndpoint checks the runtime tracked-token editor API: GET returns
+// the current set, POST replaces it (deduping/dropping invalid IDs), and the
+// tracked position reflects the new set. No network.
+func TestTrackedEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc := scanner.New(
+		scanner.Config{Chains: datasource.DefaultChains[:1], PerChain: 2, PositionInterval: time.Hour},
+		datasource.NewDemo(1),
+		datasource.DemoImpliedVol{},
+		position.NewDemoTracker(71002035),
+		onchain.NoopProber{},
+	)
+	go sc.Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && sc.Snapshot().Position == nil {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ts := httptest.NewServer(New(sc, nil).Handler())
+	defer ts.Close()
+
+	// GET the current set (one tracked ID → one synthetic position).
+	var got struct {
+		TokenIDs []int64 `json:"tokenIds"`
+	}
+	getJSON(t, ts.URL+"/api/tracked", &got)
+	if len(got.TokenIDs) != 1 || got.TokenIDs[0] != 71002035 {
+		t.Fatalf("initial tracked = %v, want [71002035]", got.TokenIDs)
+	}
+
+	// POST a new set, with a duplicate and an invalid (0) that must be dropped.
+	body := `{"tokenIds":[100,200,200,0,300]}`
+	r, err := http.Post(ts.URL+"/api/tracked", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /api/tracked: %v", err)
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", r.StatusCode)
+	}
+	var set struct {
+		TokenIDs []int64 `json:"tokenIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&set); err != nil {
+		t.Fatalf("decode POST resp: %v", err)
+	}
+	if len(set.TokenIDs) != 3 || set.TokenIDs[0] != 100 || set.TokenIDs[2] != 300 {
+		t.Fatalf("post-set tracked = %v, want [100 200 300]", set.TokenIDs)
+	}
+
+	// The tracked position should now show three synthetic positions.
+	var pos struct {
+		Tracking bool `json:"tracking"`
+		Position struct {
+			Positions []map[string]any `json:"positions"`
+		} `json:"position"`
+	}
+	getJSON(t, ts.URL+"/api/position", &pos)
+	if len(pos.Position.Positions) != 3 {
+		t.Fatalf("position count = %d, want 3", len(pos.Position.Positions))
+	}
+
+	// An empty set must be rejected (never wipe tracking).
+	r2, err := http.Post(ts.URL+"/api/tracked", "application/json", strings.NewReader(`{"tokenIds":[]}`))
+	if err != nil {
+		t.Fatalf("POST empty: %v", err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty POST status = %d, want 400", r2.StatusCode)
+	}
 }
 
 func finite(t *testing.T, m map[string]any, key string) {
