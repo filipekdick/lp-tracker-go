@@ -161,6 +161,25 @@ type Tracker interface {
 	Name() string
 	Track(ctx context.Context) (TrackedPosition, error)
 	CancelOrder(ctx context.Context, symbol string, orderID int64) error
+	// TokenIDs returns the LP position token IDs currently tracked, and
+	// SetTokenIDs replaces them at runtime (so the dashboard can change which
+	// positions are tracked without a restart).
+	TokenIDs() []int64
+	SetTokenIDs(ids []int64)
+}
+
+// dedupePositive returns the positive, de-duplicated token IDs preserving order.
+func dedupePositive(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // hedgeBaseAssets is the set of normalized assets with a liquid linear perp on

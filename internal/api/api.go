@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -35,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pools", s.handlePools)
 	mux.HandleFunc("/api/pools/", s.handlePoolDetail)
 	mux.HandleFunc("/api/position", s.handlePosition)
+	mux.HandleFunc("/api/tracked", s.handleTracked)
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/orders", s.handleOrders)
 
@@ -178,6 +180,90 @@ func (s *Server) handlePoolDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "pool not found"})
+}
+
+// handleTracked gets (GET) or replaces (POST) the LP position token IDs being
+// tracked, so the dashboard can change which positions are tracked at runtime.
+//
+// POST body accepts either a JSON array of numbers, an object {"tokenIds":[...]}
+// or {"tokenIds":"1,2,3"} (a comma/space-separated string). Invalid, duplicate
+// and non-positive IDs are dropped; an empty result is rejected.
+func (s *Server) handleTracked(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"tokenIds": s.scanner.TrackedTokenIDs()})
+	case http.MethodPost, http.MethodPut:
+		ids, err := parseTokenIDsBody(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(ids) == 0 {
+			http.Error(w, "no valid token IDs provided", http.StatusBadRequest)
+			return
+		}
+		result, err := s.scanner.SetTrackedTokenIDs(r.Context(), ids)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tokenIds": result})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// parseTokenIDsBody extracts token IDs from the request body, accepting a raw
+// JSON array, an object with a "tokenIds" array, or a comma/space-separated
+// string (in the object field or as the whole body).
+func parseTokenIDsBody(r *http.Request) ([]int64, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty body")
+	}
+
+	// Try a bare JSON array of numbers first.
+	var arr []int64
+	if json.Unmarshal(body, &arr) == nil {
+		return arr, nil
+	}
+	// Then an object; tokenIds may be an array or a string.
+	var obj struct {
+		TokenIDs json.RawMessage `json:"tokenIds"`
+	}
+	if json.Unmarshal(body, &obj) == nil && len(obj.TokenIDs) > 0 {
+		var nums []int64
+		if json.Unmarshal(obj.TokenIDs, &nums) == nil {
+			return nums, nil
+		}
+		var str string
+		if json.Unmarshal(obj.TokenIDs, &str) == nil {
+			return parseTokenIDsString(str), nil
+		}
+	}
+	// Finally, treat the whole body as a comma/space-separated string.
+	if ids := parseTokenIDsString(trimmed); len(ids) > 0 {
+		return ids, nil
+	}
+	return nil, fmt.Errorf("could not parse token IDs from body")
+}
+
+// parseTokenIDsString parses a comma/space/newline-separated list of integers.
+func parseTokenIDsString(s string) []int64 {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r' || r == ';'
+	})
+	var ids []int64
+	for _, f := range fields {
+		if n, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
 }
 
 // handlePosition serves the currently tracked LP position and its hedge.
