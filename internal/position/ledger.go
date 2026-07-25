@@ -40,6 +40,8 @@ type PnLComponents struct {
 	// LPFees is the cumulative LP fees since inception (collected + uncollected),
 	// added (+ = fees earned).
 	LPFees float64
+	// GaugeRewards is cumulative Aerodrome gauge income (+ = rewards earned).
+	GaugeRewards float64
 }
 
 // NetPnL is the strategy net PnL identity:
@@ -50,13 +52,15 @@ type PnLComponents struct {
 //	        + funding              (signed)
 //	        - commissions          (a paid cost)
 //	        + LP fees              (cumulative: collected + uncollected)
+//	        + Aerodrome gauge rewards
 func (c PnLComponents) NetPnL() float64 {
 	return c.LPChange +
 		c.HedgeUnrealized +
 		c.HedgeRealized +
 		c.Funding -
 		c.Commissions +
-		c.LPFees
+		c.LPFees +
+		c.GaugeRewards
 }
 
 // MismatchUSD is the LP–hedge mismatch line: the residual once LP fees are

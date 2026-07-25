@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,20 +33,27 @@ type priceProvider interface {
 	Price(ctx context.Context, symbol string) (float64, error)
 }
 
+// positionHistoryStore persists cumulative snapshots across process restarts.
+type positionHistoryStore interface {
+	SavePositionSnapshot(ctx context.Context, portfolioKey string, snapshot Snapshot) error
+	LoadPositionSnapshots(ctx context.Context, portfolioKey string, since time.Time) ([]Snapshot, error)
+}
+
 // LiveTracker reads one or more positions from chain, prices their pools via
 // GeckoTerminal, pulls implied vol from Deribit and reads/syncs the matching
 // Binance shorts. When several token IDs are tracked it sums their volatile-leg
 // exposure by asset (folding synthetics together) and hedges each asset with a
 // single short.
 type LiveTracker struct {
-	reader   poolReader
-	pricer   poolPricer
-	prices   priceProvider
-	iv       datasource.ImpliedVolSource
-	bn       *binance.Client
-	chain    datasource.Chain
-	dryRun   bool
-	strategy *hedger.Strategy
+	reader       poolReader
+	pricer       poolPricer
+	prices       priceProvider
+	iv           datasource.ImpliedVolSource
+	bn           *binance.Client
+	chain        datasource.Chain
+	dryRun       bool
+	strategy     *hedger.Strategy
+	historyStore positionHistoryStore
 
 	// idsMu guards tokenIDs, which the dashboard can change at runtime.
 	idsMu    sync.RWMutex
@@ -56,7 +65,11 @@ type LiveTracker struct {
 	// feeLedgers banks collected LP fees across harvests per tracked position
 	// (token units), keyed by token ID, so a portfolio of positions keeps each
 	// leg's harvest accounting separate.
-	feeLedgers map[int64]*FeeLedger
+	feeLedgers           map[int64]*FeeLedger
+	historyLoaded        bool
+	portfolioKey         string
+	feeOffset            float64
+	feeOffsetInitialized bool
 }
 
 // NewLiveTracker wires the live data sources. bn may be nil, in which case the
@@ -72,18 +85,21 @@ func NewLiveTracker(
 	chain datasource.Chain,
 	dryRun bool,
 	strategy *hedger.Strategy,
+	historyStore positionHistoryStore,
 ) *LiveTracker {
 	return &LiveTracker{
-		reader:     reader,
-		pricer:     pricer,
-		prices:     prices,
-		iv:         iv,
-		bn:         bn,
-		tokenIDs:   tokenIDs,
-		chain:      chain,
-		dryRun:     dryRun,
-		strategy:   strategy,
-		feeLedgers: map[int64]*FeeLedger{},
+		reader:       reader,
+		pricer:       pricer,
+		prices:       prices,
+		iv:           iv,
+		bn:           bn,
+		tokenIDs:     tokenIDs,
+		chain:        chain,
+		dryRun:       dryRun,
+		strategy:     strategy,
+		historyStore: historyStore,
+		portfolioKey: portfolioHistoryKey(tokenIDs),
+		feeLedgers:   map[int64]*FeeLedger{},
 	}
 }
 
@@ -113,6 +129,10 @@ func (t *LiveTracker) SetTokenIDs(ids []int64) {
 	t.initialState = nil
 	t.history = nil
 	t.feeLedgers = map[int64]*FeeLedger{}
+	t.historyLoaded = false
+	t.portfolioKey = portfolioHistoryKey(clean)
+	t.feeOffset = 0
+	t.feeOffsetInitialized = false
 	t.mu.Unlock()
 }
 
@@ -135,6 +155,7 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	if len(tokenIDs) == 0 {
 		return TrackedPosition{}, fmt.Errorf("no token IDs configured to track")
 	}
+	t.ensureHistory(ctx)
 
 	var legs []trackedLeg
 	var firstErr error
@@ -214,6 +235,13 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		feesToCollect += led.ToCollectUSD(l.price0, l.price1)
 		feesTotal += led.TotalUSD(l.price0, l.price1)
 	}
+	if !t.feeOffsetInitialized {
+		if len(t.history) > 0 {
+			t.feeOffset = t.history[len(t.history)-1].FeesUSD - feesTotal
+		}
+		t.feeOffsetInitialized = true
+	}
+	feesTotal += t.feeOffset
 
 	// Snapshot for history (portfolio-level).
 	snap := Snapshot{
@@ -260,10 +288,11 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		comps := PnLComponents{
 			LPChange:        snap.ValueUSD - t.initialState.ValueUSD,
 			HedgeUnrealized: snap.HedgePnL - t.initialState.HedgePnL,
-			HedgeRealized:   ledger.RealizedPnL,
-			Funding:         ledger.Funding,
-			Commissions:     ledger.Commissions,
+			HedgeRealized:   ledger.RealizedPnL - t.initialState.HedgeRealizedPnL,
+			Funding:         ledger.Funding - t.initialState.HedgeFundingUSD,
+			Commissions:     ledger.Commissions - t.initialState.HedgeCommissionsUSD,
 			LPFees:          snap.FeesUSD - t.initialState.FeesUSD,
+			GaugeRewards:    snap.GaugeRewardsUSD - t.initialState.GaugeRewardsUSD,
 		}
 		snap.NetPnL = comps.NetPnL()
 
@@ -271,14 +300,55 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		tp.Analysis.PositionFeeAPR = analyzer.PositionFeeAPR(comps.LPFees, tp.ValueUSD, elapsed)
 
 		t.history = append(t.history, snap)
-		if len(t.history) > 1000 {
-			t.history = t.history[len(t.history)-1000:]
+		// Keep up to 90 days at the default three-minute cadence in memory. The
+		// PostgreSQL table remains the durable source across process restarts.
+		const maxHistorySnapshots = 90 * 24 * 20
+		if len(t.history) > maxHistorySnapshots {
+			t.history = t.history[len(t.history)-maxHistorySnapshots:]
 		}
 		tp.InitialState = t.initialState
 		tp.History = t.history
+		tp.DailyReturns = BuildDailyReturns(t.initialState, t.history)
+		if t.historyStore != nil {
+			if err := t.historyStore.SavePositionSnapshot(ctx, t.portfolioKey, snap); err != nil {
+				log.Printf("[tracker] persisting position history failed: %v", err)
+			}
+		}
 	}
 
 	return tp, nil
+}
+
+func (t *LiveTracker) ensureHistory(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.historyLoaded {
+		return
+	}
+	t.historyLoaded = true
+	if t.historyStore == nil {
+		return
+	}
+	snapshots, err := t.historyStore.LoadPositionSnapshots(ctx, t.portfolioKey, time.Now().Add(-90*24*time.Hour))
+	if err != nil {
+		log.Printf("[tracker] loading position history failed: %v", err)
+		return
+	}
+	if len(snapshots) > 0 {
+		initial := snapshots[0]
+		t.initialState = &initial
+		t.history = snapshots
+	}
+}
+
+func portfolioHistoryKey(ids []int64) string {
+	clean := append([]int64(nil), ids...)
+	sort.Slice(clean, func(i, j int) bool { return clean[i] < clean[j] })
+	parts := make([]string, 0, len(clean))
+	for _, id := range clean {
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, ",")
 }
 
 // priceLeg prices one position's pool and runs the fee-vs-volatility model,

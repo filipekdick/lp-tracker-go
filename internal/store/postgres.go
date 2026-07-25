@@ -10,6 +10,7 @@ import (
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
+	"github.com/filipekdick/lp-tracker-go/internal/position"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -63,7 +64,14 @@ CREATE TABLE IF NOT EXISTS pool_snapshots (
   data JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (chain_slug, address)
-);`)
+);
+CREATE TABLE IF NOT EXISTS position_snapshots (
+  portfolio_key TEXT NOT NULL,
+  observed_at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (portfolio_key, observed_at)
+);
+CREATE INDEX IF NOT EXISTS position_snapshots_history_idx ON position_snapshots (portfolio_key, observed_at DESC);`)
 	if err != nil {
 		return fmt.Errorf("migrate postgres: %w", err)
 	}
@@ -128,4 +136,50 @@ ON CONFLICT (chain_slug, address) DO UPDATE SET data = EXCLUDED.data, updated_at
 		return fmt.Errorf("save pool %s: %w", pool.Address, err)
 	}
 	return nil
+}
+
+// SavePositionSnapshot appends one cumulative accounting observation. The
+// portfolio key isolates histories when the tracked token-ID set changes.
+func (p *Postgres) SavePositionSnapshot(ctx context.Context, portfolioKey string, snapshot position.Snapshot) error {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode position snapshot: %w", err)
+	}
+	_, err = p.db.ExecContext(ctx, `
+INSERT INTO position_snapshots (portfolio_key, observed_at, data) VALUES ($1, $2, $3)
+ON CONFLICT (portfolio_key, observed_at) DO UPDATE SET data = EXCLUDED.data`, portfolioKey, snapshot.Timestamp, data)
+	if err != nil {
+		return fmt.Errorf("save position snapshot: %w", err)
+	}
+	return nil
+}
+
+// LoadPositionSnapshots returns oldest-first observations within the requested
+// retention window.
+func (p *Postgres) LoadPositionSnapshots(ctx context.Context, portfolioKey string, since time.Time) ([]position.Snapshot, error) {
+	rows, err := p.db.QueryContext(ctx, `
+SELECT data FROM position_snapshots
+WHERE portfolio_key = $1 AND observed_at >= $2
+ORDER BY observed_at ASC`, portfolioKey, since)
+	if err != nil {
+		return nil, fmt.Errorf("load position history: %w", err)
+	}
+	defer rows.Close()
+
+	var snapshots []position.Snapshot
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("scan position history: %w", err)
+		}
+		var snapshot position.Snapshot
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, fmt.Errorf("decode position history: %w", err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate position history: %w", err)
+	}
+	return snapshots, nil
 }

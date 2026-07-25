@@ -61,6 +61,25 @@ button {
 }
 button:hover { background: #232c3d; border-color: #33405a; }
 
+/* ---- page navigation ---- */
+.page-nav {
+  display: flex;
+  gap: 6px;
+  padding: 12px 24px 0;
+  border-bottom: 1px solid var(--border);
+}
+.page-nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 9px 14px 10px;
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+  font-weight: 600;
+}
+.page-nav-link:hover { color: var(--text); }
+.page-nav-link.active { color: var(--accent); border-bottom-color: var(--accent); }
+.page-view[hidden] { display: none; }
+
 /* ---- summary cards ---- */
 .summary {
   display: grid;
@@ -105,6 +124,17 @@ button:hover { background: #232c3d; border-color: #33405a; }
 .tracked-editor-msg { display: block; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .tracked-editor-msg.err { color: var(--red); }
 .tracked-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+
+/* ---- daily strategy accounting ---- */
+.history-section { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
+.history-head { align-items: center; }
+.history-head > div { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.history-table-wrap { overflow-x: auto; }
+.history-table { min-width: 980px; }
+.history-table tbody tr { cursor: default; }
+.history-table .daily-net { background: rgba(77, 163, 255, .04); font-weight: 600; }
+.history-note { color: var(--muted); margin: 10px 2px 0; font-size: 12px; }
+.muted { color: var(--muted); }
 
 /* ---- Krystal-style position summary cards ---- */
 .pcards {
@@ -233,6 +263,12 @@ button:hover { background: #232c3d; border-color: #33405a; }
   align-items: start;
 }
 @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .topbar, .tracked, .summary, .controls, .layout, .page-nav { margin-left: 0; margin-right: 0; }
+  .tracked { margin-left: 12px; margin-right: 12px; }
+  .page-nav, .summary, .controls { padding-left: 12px; padding-right: 12px; }
+  .layout { padding-left: 12px; padding-right: 12px; }
+}
 
 /* ---- table ---- */
 .table-wrap {

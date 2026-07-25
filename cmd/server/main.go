@@ -185,7 +185,7 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource,
 
 	poolPricer := position.NewCachedPoolPricer(gecko, db, envDuration("POOL_CACHE_TTL", 6*time.Hour))
 	prices := marketdata.NewBinanceMarkPrices(os.Getenv("BINANCE_FUTURES_URL"), db, envDuration("PRICE_CACHE_TTL", time.Minute))
-	return position.NewLiveTracker(reader, poolPricer, prices, implied, bn, tokenIDs, base, dryRun, strategy)
+	return position.NewLiveTracker(reader, poolPricer, prices, implied, bn, tokenIDs, base, dryRun, strategy, db)
 }
 
 // trackTokenIDs reads the LP positions to track. TRACK_TOKEN_IDS takes a

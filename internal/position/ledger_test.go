@@ -52,7 +52,7 @@ func TestMismatchLine(t *testing.T) {
 		t.Fatalf("mismatch = %v, want 13.5", mismatch)
 	}
 	// Equivalence: mismatch == netPnL − fees.
-	net := PnLComponents{lpChange, unreal, realized, funding, comm, fees}.NetPnL()
+	net := PnLComponents{lpChange, unreal, realized, funding, comm, fees, 0}.NetPnL()
 	if !approx(mismatch, net-fees) {
 		t.Fatalf("mismatch %v != netPnL-fees %v", mismatch, net-fees)
 	}
@@ -173,6 +173,7 @@ func TestDemoRendersIncomeFields(t *testing.T) {
 		Funding:         last.HedgeFundingUSD,
 		Commissions:     last.HedgeCommissionsUSD,
 		LPFees:          last.FeesUSD - init.FeesUSD,
+		GaugeRewards:    last.GaugeRewardsUSD - init.GaugeRewardsUSD,
 	}.NetPnL()
 	if !approx(last.NetPnL, want) {
 		t.Fatalf("demo net PnL %v != identity %v", last.NetPnL, want)

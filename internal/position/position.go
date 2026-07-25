@@ -126,9 +126,11 @@ type TrackedPosition struct {
 	FeesToCollectUSD float64 `json:"feesToCollectUsd"`
 	FeesTotalUSD     float64 `json:"feesTotalUsd"`
 
-	// History
-	InitialState *Snapshot  `json:"initialState"`
-	History      []Snapshot `json:"history"`
+	// History. DailyReturns is derived from persisted cumulative snapshots and is
+	// the accounting table consumed by the position/rebalancing dashboard.
+	InitialState *Snapshot     `json:"initialState"`
+	History      []Snapshot    `json:"history"`
+	DailyReturns []DailyReturn `json:"dailyReturns"`
 
 	Source    string    `json:"source"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -151,9 +153,14 @@ type Snapshot struct {
 	HedgeFundingUSD     float64 `json:"hedgeFundingUsd"`
 	HedgeCommissionsUSD float64 `json:"hedgeCommissionsUsd"`
 	// FeesUSD is the cumulative LP fees (collected + uncollected) in USD — the
-	// value used by the net PnL identity and the chart, so it survives harvests.
+	// value used by the net PnL identity, so it survives harvests.
 	FeesUSD float64 `json:"feesUsd"`
-	NetPnL  float64 `json:"netPnl"`
+	// Gauge rewards are modelled separately from swap fees. Live collection is not
+	// connected yet, so GaugeRewardsAvailable remains false rather than reporting a
+	// misleading zero. The cumulative field is ready for persisted event data.
+	GaugeRewardsUSD       float64 `json:"gaugeRewardsUsd"`
+	GaugeRewardsAvailable bool    `json:"gaugeRewardsAvailable"`
+	NetPnL                float64 `json:"netPnl"`
 }
 
 // Tracker produces the current state of a tracked position.

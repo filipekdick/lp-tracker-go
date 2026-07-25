@@ -16,7 +16,8 @@ A crypto liquidity-pool analyzer that does two things:
    volatility**, with a focus on Aerodrome, Velodrome, PancakeSwap and Uniswap.
 
 It ships as a single Go binary: a background scanner + position tracker + JSON
-API + a zero-build web dashboard.
+API + a zero-build web dashboard. The dashboard has separate **Positions &
+rebalancing** and **Pool opportunities** pages; positions are the default view.
 
 ![dashboard](https://img.shields.io/badge/stack-Go%20%2B%20vanilla%20JS-blue)
 
@@ -453,6 +454,9 @@ GeckoTerminal. Listed volatile assets are valued with Binance's **public**
 USD-M futures mark-price endpoint, which does not require an API key; those
 observations are cached in PostgreSQL for one minute by default. Stablecoins
 and assets unavailable on Binance fall back to the persisted pool price.
+Position accounting snapshots are also persisted and rolled into a 90-day UTC
+daily-return table (LP value change, swap fees, gauge rewards when available,
+hedge P&L, funding, and trading fees paid).
 
 > Live mode needs outbound access to `api.geckoterminal.com` and
 > `www.deribit.com`. Both are public and key-free, but GeckoTerminal rate-limits

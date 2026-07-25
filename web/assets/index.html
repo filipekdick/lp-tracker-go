@@ -6,7 +6,7 @@
   <title>LP Vol Analyzer — fees vs. volatility</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 </head>
 <body>
   <header class="topbar">
@@ -22,15 +22,19 @@
         <span class="dot" id="source-dot"></span>
         <span id="source-label">source: …</span>
       </div>
-      <div class="status-line">
+      <div class="status-line" id="pool-scan-status">
         <span id="scan-label">pool scan: manual</span>
         <button id="scan-now" title="Trigger an immediate scan">Scan now</button>
       </div>
     </div>
   </header>
 
-  <section class="summary" id="summary"></section>
+  <nav class="page-nav" aria-label="Dashboard pages">
+    <a href="/?page=positions" class="page-nav-link" data-page-link="positions">Positions &amp; rebalancing</a>
+    <a href="/?page=pools" class="page-nav-link" data-page-link="pools">Pool opportunities</a>
+  </nav>
 
+  <div class="page-view" id="positions-page">
   <section class="tracked" id="tracked" hidden>
     <div class="tracked-head">
       <h2>Tracked positions &amp; hedge</h2>
@@ -49,8 +53,32 @@
     <div class="pcards" id="position-summary"></div>
     <div class="tracked-grid" id="tracked-grid"></div>
 
-    <div class="graphs-section" id="graphs-section" hidden style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem;">
-      <canvas id="pnl-chart" width="400" height="200"></canvas>
+    <div class="history-section" id="history-section" hidden>
+      <div class="tracked-head history-head">
+        <div>
+          <h2>Daily strategy returns</h2>
+          <span class="tracked-sub">UTC daily changes, separated by source and cost</span>
+        </div>
+      </div>
+      <div class="table-wrap history-table-wrap">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Date (UTC)</th>
+              <th class="num">LP value Δ</th>
+              <th class="num">LP fees</th>
+              <th class="num">AERO gauge</th>
+              <th class="num">Hedge P&amp;L</th>
+              <th class="num">Funding</th>
+              <th class="num">Trading fees paid</th>
+              <th class="num">Net return</th>
+              <th class="num">Return %</th>
+            </tr>
+          </thead>
+          <tbody id="daily-returns-body"></tbody>
+        </table>
+      </div>
+      <p class="hint history-note" id="daily-returns-note"></p>
     </div>
   </section>
 
@@ -99,7 +127,10 @@
       </table>
     </div>
   </section>
+  </div>
 
+  <div class="page-view" id="pools-page" hidden>
+  <section class="summary" id="summary"></section>
 
   <h2 class="section-title">Most profitable pools by chain</h2>
 
@@ -178,11 +209,12 @@
       <div id="detail-content" hidden></div>
     </aside>
   </main>
+  </div>
 
   <footer class="footer">
     <span>Model: LVR cost = σ²⁄8 (Milionis–Moallemi–Roughgarden–Zhang). Breakeven σ = fee-implied σ = √(8·feeAPR) (optimistic, full-range; swap fees only).</span>
   </footer>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

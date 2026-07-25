@@ -16,6 +16,7 @@ const state = {
   method: "close7d", // selected realized-volatility method
   horizonDays: 1, // horizon T (days) for the ±σ range bands and expected edge
   k: 1, // band width in sigmas (1 or 2) for the bands and expected edge
+  page: new URLSearchParams(window.location.search).get("page") === "pools" ? "pools" : "positions",
 };
 
 // view returns the analysis fields for a pool under the currently selected
@@ -153,19 +154,28 @@ async function getJSON(url, opts) {
 
 async function refresh() {
   try {
-    const [meta, poolsResp, posResp] = await Promise.all([
+    if (state.page === "positions") {
+      const [meta, posResp] = await Promise.all([
+        getJSON("/api/meta"),
+        getJSON("/api/position").catch(() => ({ tracking: false })),
+      ]);
+      state.meta = meta;
+      state.position = posResp && posResp.tracking ? posResp.position : null;
+      renderStatus(meta, meta);
+      renderPosition();
+      return;
+    }
+
+    const [meta, poolsResp] = await Promise.all([
       getJSON("/api/meta"),
       getJSON("/api/pools"),
-      getJSON("/api/position").catch(() => ({ tracking: false })),
     ]);
     state.meta = meta;
     state.pools = poolsResp.pools || [];
-    state.position = posResp && posResp.tracking ? posResp.position : null;
     state.nextScan = poolsResp.nextScan ? new Date(poolsResp.nextScan) : null;
     state.scanning = !!poolsResp.scanning;
     renderStatus(meta, poolsResp);
     renderSummary(meta);
-    renderPosition();
     syncProtocolFilter();
     renderTable();
     if (state.selected) renderDetail(findSelected());
@@ -638,46 +648,47 @@ function renderPosition() {
     ordersSec.hidden = true;
   }
 
-  const graphsSec = document.getElementById("graphs-section");
-  if (p.initialState && p.history && p.history.length > 0) {
-    graphsSec.hidden = false;
+  renderDailyReturns(p);
+}
 
-    const cur = p.history[p.history.length - 1];
-    const netPnl = cur.netPnl;
-    const initialVal = Math.max(0.01, p.initialState.valueUsd);
-    const pct = (netPnl / initialVal) * 100;
-
-    const msElapsed =
-      new Date(cur.timestamp) - new Date(p.initialState.timestamp);
-    const days = msElapsed / (1000 * 3600 * 24);
-    let aprStr = "—";
-    if (days > 0.001) {
-      const apr = (pct / days) * 365;
-      aprStr = apr.toFixed(2) + "%";
-    }
-
-    const pnlCls = netPnl >= 0 ? "ratio-pos" : "ratio-neg";
-    const pnlHtml = `<div style="display:flex; flex-wrap:wrap; gap:2rem; margin-bottom:1rem; padding:1rem; background:var(--bg-card); border-radius:8px; border:1px solid var(--border);">
-      <div style="flex:1;">
-        <h3 style="margin-top:0; display:flex; align-items:center;">
-          Strategy Net Profit
-          <button onclick="document.getElementById('pnl-chart-wrapper').style.display = document.getElementById('pnl-chart-wrapper').style.display === 'none' ? 'block' : 'none'" style="margin-left:1rem; padding:2px 8px; font-size:12px; cursor:pointer; background:var(--bg); border:1px solid var(--border); color:var(--fg); border-radius:4px;">Toggle Graph</button>
-        </h3>
-        <p class="hint">Since start (${new Date(p.initialState.timestamp).toLocaleString()})</p>
-      </div>
-      ${kv("Total PnL", `<span class="${pnlCls}">${fmt.usd(netPnl)}</span>`)}
-      ${kv("Return", `<span class="${pnlCls}">${pct.toFixed(2)}%</span>`)}
-      ${kv("APR", `<span class="${pnlCls}">${aprStr}</span>`)}
-      ${kv("Total Fees (since start)", fmt.usd(cur.feesUsd))}
-    </div>`;
-
-    let canvasHtml = `<div id="pnl-chart-wrapper" style="position: relative; height: 340px; width: 100%;"><canvas id="pnl-chart"></canvas></div>`;
-    graphsSec.innerHTML = pnlHtml + canvasHtml;
-
-    renderChart(p);
-  } else {
-    graphsSec.hidden = true;
+function renderDailyReturns(p) {
+  const section = document.getElementById("history-section");
+  const body = document.getElementById("daily-returns-body");
+  const note = document.getElementById("daily-returns-note");
+  const days = p.dailyReturns || [];
+  if (!section || !body || !days.length) {
+    if (section) section.hidden = true;
+    return;
   }
+
+  section.hidden = false;
+  const todayUTC = new Date().toISOString().slice(0, 10);
+  body.innerHTML = [...days]
+    .reverse()
+    .map((d) => {
+      const value = (n) => `<span class="${n >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.usd(n)}</span>`;
+      const gauge = d.gaugeRewardsAvailable
+        ? value(d.gaugeRewardsUsd || 0)
+        : '<span class="muted" title="Aerodrome gauge reward collection is not connected yet">—</span>';
+      const partial = d.date === todayUTC ? ' <span class="pill drift">partial</span>' : "";
+      return `<tr>
+        <td>${d.date}${partial}</td>
+        <td class="num">${value(d.lpValueChangeUsd || 0)}</td>
+        <td class="num">${value(d.lpFeesUsd || 0)}</td>
+        <td class="num">${gauge}</td>
+        <td class="num">${value(d.hedgePnlUsd || 0)}</td>
+        <td class="num">${value(d.fundingUsd || 0)}</td>
+        <td class="num"><span class="ratio-neg">${fmt.usd(-(d.tradingFeesPaidUsd || 0))}</span></td>
+        <td class="num daily-net">${value(d.netReturnUsd || 0)}</td>
+        <td class="num daily-net"><span class="${(d.returnPct || 0) >= 0 ? "ratio-pos" : "ratio-neg"}">${fmt.pct(d.returnPct || 0)}</span></td>
+      </tr>`;
+    })
+    .join("");
+
+  const hasGauge = days.some((d) => d.gaugeRewardsAvailable);
+  note.textContent = hasGauge
+    ? "Net return = LP value change + LP fees + gauge rewards + hedge P&L + funding − trading fees."
+    : "Aerodrome gauge rewards are not connected to the live event indexer yet, so that column is shown as unavailable rather than as a false $0. Other values are persisted in PostgreSQL when DATABASE_URL is configured.";
 }
 
 function renderChart(p) {
@@ -1327,6 +1338,17 @@ function wireTrackedEditor() {
   });
 }
 
+function setPage(page) {
+  state.page = page === "pools" ? "pools" : "positions";
+  document.getElementById("positions-page").hidden = state.page !== "positions";
+  document.getElementById("pools-page").hidden = state.page !== "pools";
+  const scanStatus = document.getElementById("pool-scan-status");
+  if (scanStatus) scanStatus.hidden = state.page !== "pools";
+  document.querySelectorAll("[data-page-link]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.pageLink === state.page);
+  });
+}
+
 function setActive(group, btn) {
   document
     .querySelectorAll(group + " .chip")
@@ -1334,6 +1356,7 @@ function setActive(group, btn) {
   btn.classList.add("active");
 }
 
+setPage(state.page);
 wireControls();
 refresh();
 setInterval(refresh, 5000);

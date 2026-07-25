@@ -212,6 +212,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	realized := 35 + rng.Float64()*20 // banked at past rebalances
 	funding := 8 + rng.Float64()*6    // net funding the short received (positive)
 	commissions := 4 + rng.Float64()*3
+	gaugeRewards := 25 + rng.Float64()*15
 	tp.HedgeRealizedPnL = realized
 	tp.HedgeFundingUSD = funding
 	tp.HedgeCommissionsUSD = commissions
@@ -234,7 +235,8 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	// draw before any live scans land. Live tracking builds this incrementally;
 	// here we backfill a believable few hours in one shot.
 	tp.InitialState, tp.History = demoHistory(rng, closes, wethAmount, usdcAmount, current, entryPrice,
-		realized, funding, commissions, tp.FeesTotalUSD)
+		realized, funding, commissions, tp.FeesTotalUSD, gaugeRewards)
+	tp.DailyReturns = BuildDailyReturns(tp.InitialState, tp.History)
 
 	// Synthetic open limit orders so the "Open limit orders" table and its
 	// Cancel button are exercisable without live credentials.
@@ -263,16 +265,16 @@ func demoOpenShorts(rng *rand.Rand, ethShort, ethEntry, ethMark float64) []binan
 	return shorts
 }
 
-// demoHistory backfills a few hours of strategy snapshots ending now, so the
-// graph paints a line on first load. NetPnL follows the full identity (see
+// demoHistory backfills seven days of hourly strategy snapshots ending now, so
+// the daily-return table is populated on first load. NetPnL follows the full identity (see
 // PnLComponents.NetPnL): LP value change + hedge unrealized + hedge realized +
 // funding − commissions + cumulative LP fees. The cumulative income terms and
 // fees ramp from zero at inception to their totals now, so the curve starts at
 // zero like the baseline (NetPnL zero).
 func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short, entry,
-	realizedTotal, fundingTotal, commissionsTotal, feesTotalCum float64) (*Snapshot, []Snapshot) {
-	const n = 24
-	const step = 8 * time.Minute
+	realizedTotal, fundingTotal, commissionsTotal, feesTotalCum, gaugeRewardsTotal float64) (*Snapshot, []Snapshot) {
+	const n = 7 * 24
+	const step = time.Hour
 	if len(closes) < n {
 		return nil, nil
 	}
@@ -298,6 +300,7 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 		funding := fundingTotal * progress
 		commissions := commissionsTotal * progress
 		feesCum := feesTotalCum * progress // cumulative collected + uncollected
+		gaugeRewards := gaugeRewardsTotal * progress
 		comps := PnLComponents{
 			LPChange:        value - value0,
 			HedgeUnrealized: hedgePnL - hedge0,
@@ -305,20 +308,23 @@ func demoHistory(rng *rand.Rand, closes []float64, wethAmount, usdcAmount, short
 			Funding:         funding,
 			Commissions:     commissions,
 			LPFees:          feesCum,
+			GaugeRewards:    gaugeRewards,
 		}
 		hist = append(hist, Snapshot{
-			Timestamp:           start.Add(time.Duration(i) * step),
-			Price0:              price,
-			Price1:              1,
-			Amount0:             amt0,
-			Amount1:             amt1,
-			ValueUSD:            value,
-			HedgePnL:            hedgePnL,
-			HedgeRealizedPnL:    realized,
-			HedgeFundingUSD:     funding,
-			HedgeCommissionsUSD: commissions,
-			FeesUSD:             feesCum,
-			NetPnL:              comps.NetPnL(),
+			Timestamp:             start.Add(time.Duration(i) * step),
+			Price0:                price,
+			Price1:                1,
+			Amount0:               amt0,
+			Amount1:               amt1,
+			ValueUSD:              value,
+			HedgePnL:              hedgePnL,
+			HedgeRealizedPnL:      realized,
+			HedgeFundingUSD:       funding,
+			HedgeCommissionsUSD:   commissions,
+			FeesUSD:               feesCum,
+			GaugeRewardsUSD:       gaugeRewards,
+			GaugeRewardsAvailable: true,
+			NetPnL:                comps.NetPnL(),
 		})
 	}
 	initial := hist[0]
