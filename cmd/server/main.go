@@ -36,9 +36,11 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 	"github.com/filipekdick/lp-tracker-go/internal/lp"
+	"github.com/filipekdick/lp-tracker-go/internal/marketdata"
 	"github.com/filipekdick/lp-tracker-go/internal/onchain"
 	"github.com/filipekdick/lp-tracker-go/internal/position"
 	"github.com/filipekdick/lp-tracker-go/internal/scanner"
+	"github.com/filipekdick/lp-tracker-go/internal/store"
 	"github.com/filipekdick/lp-tracker-go/web"
 )
 
@@ -60,10 +62,23 @@ func main() {
 	position.HedgeQuotePreference = strings.ToLower(envStr("HEDGE_QUOTE", "usdc"))
 
 	source, implied := buildSources()
+	var db *store.Postgres
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		var err error
+		db, err = store.Open(context.Background(), databaseURL)
+		if err != nil {
+			log.Printf("PostgreSQL unavailable; cache disabled: %v", err)
+		} else {
+			defer db.Close()
+			log.Println("PostgreSQL market-data cache enabled")
+		}
+	} else {
+		log.Println("DATABASE_URL not set; PostgreSQL market-data cache disabled")
+	}
 	log.Printf("data source: %s | %d chains | %d pools/chain | position every %s | pool scan: manual trigger only",
 		source.Name(), len(cfg.Chains), cfg.PerChain, cfg.PositionInterval)
 
-	tracker := buildTracker(source, implied)
+	tracker := buildTracker(source, implied, db)
 	if tracker != nil {
 		ids := trackTokenIDs()
 		log.Printf("position tracking: %s | token IDs %v | hedge quote: %s", tracker.Name(), ids, position.HedgeQuotePreference)
@@ -126,10 +141,11 @@ const (
 
 // buildTracker builds the single-position tracker. In demo mode it synthesises
 // a position; in live mode it reads an Aerodrome position on Base from RPC,
-// prices it via GeckoTerminal, pulls implied vol from Deribit and (optionally)
-// reads the Binance hedge. A misconfigured live tracker degrades to the demo
+// gets cached pool metadata from PostgreSQL, values listed assets with Binance's
+// public mark-price feed, pulls implied vol from Deribit and (optionally) reads
+// the Binance hedge. A misconfigured live tracker degrades to the demo
 // tracker rather than crashing the server.
-func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource) position.Tracker {
+func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource, db *store.Postgres) position.Tracker {
 	tokenIDs := trackTokenIDs()
 
 	if strings.ToLower(envStr("DATA_SOURCE", "demo")) != "live" {
@@ -167,7 +183,9 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource)
 	upper := envFloat("HEDGE_MARKET_THRESHOLD", envFloat("HEDGE_DRIFT_THRESHOLD", 0.06))
 	strategy := &hedger.Strategy{LowerThreshold: lower, UpperThreshold: upper}
 
-	return position.NewLiveTracker(reader, gecko, implied, bn, tokenIDs, base, dryRun, strategy)
+	poolPricer := position.NewCachedPoolPricer(gecko, db, envDuration("POOL_CACHE_TTL", 6*time.Hour))
+	prices := marketdata.NewBinanceMarkPrices(os.Getenv("BINANCE_FUTURES_URL"), db, envDuration("PRICE_CACHE_TTL", time.Minute))
+	return position.NewLiveTracker(reader, poolPricer, prices, implied, bn, tokenIDs, base, dryRun, strategy)
 }
 
 // trackTokenIDs reads the LP positions to track. TRACK_TOKEN_IDS takes a

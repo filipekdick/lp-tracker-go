@@ -441,7 +441,18 @@ go run ./cmd/server
 
 # Live data from GeckoTerminal (pools/OHLCV) + Deribit (implied vol):
 DATA_SOURCE=live SCAN_INTERVAL=10m go run ./cmd/server
+
+# Recommended: start the local PostgreSQL market-data cache, then run live mode.
+docker compose up -d postgres
+DATABASE_URL='postgres://lp_tracker:lp_tracker_dev@localhost:5432/lp_tracker?sslmode=disable' DATA_SOURCE=live RPC_URL='https://…' go run ./cmd/server
 ```
+
+With `DATABASE_URL` configured, a position refresh reads its latest pool
+snapshot from PostgreSQL (default freshness: 6 hours) instead of calling
+GeckoTerminal. Listed volatile assets are valued with Binance's **public**
+USD-M futures mark-price endpoint, which does not require an API key; those
+observations are cached in PostgreSQL for one minute by default. Stablecoins
+and assets unavailable on Binance fall back to the persisted pool price.
 
 > Live mode needs outbound access to `api.geckoterminal.com` and
 > `www.deribit.com`. Both are public and key-free, but GeckoTerminal rate-limits
@@ -466,6 +477,10 @@ DATA_SOURCE=live SCAN_INTERVAL=10m go run ./cmd/server
 | `RPC_URL` | — | Base RPC (required for **live** position tracking; also the default `RPC_BASE` for on-chain probing) |
 | `RPC_BASE` / `RPC_ARBITRUM` / `RPC_ETH` / `RPC_OPTIMISM` / `RPC_POLYGON` / `RPC_BSC` / `RPC_AVALANCHE` | — | per-chain RPC endpoints for the on-chain active-liquidity probe (concentrated APR) |
 | `BINANCE_TESTNET_API_KEY` / `_SECRET` | — | optional; enables live hedge read |
+| `DATABASE_URL` | — | PostgreSQL connection string; enables persisted pool snapshots and price observations (schema is created automatically) |
+| `POOL_CACHE_TTL` | `6h` | maximum age of a cached GeckoTerminal pool/OHLCV snapshot before refreshing it |
+| `PRICE_CACHE_TTL` | `1m` | maximum age of a cached Binance public mark price before requesting a fresh one |
+| `BINANCE_FUTURES_URL` | `https://fapi.binance.com` | override Binance public USD-M futures API base URL |
 | `GECKOTERMINAL_URL` | public API | override base URL (proxy) |
 | `DERIBIT_URL` | public API | override base URL (proxy) |
 

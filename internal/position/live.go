@@ -25,6 +25,12 @@ type poolPricer interface {
 	PoolByAddress(ctx context.Context, chain datasource.Chain, address string) (datasource.RawPool, error)
 }
 
+// priceProvider supplies a current USD price for a Binance futures symbol.
+// The public Binance endpoint needs no API key.
+type priceProvider interface {
+	Price(ctx context.Context, symbol string) (float64, error)
+}
+
 // LiveTracker reads one or more positions from chain, prices their pools via
 // GeckoTerminal, pulls implied vol from Deribit and reads/syncs the matching
 // Binance shorts. When several token IDs are tracked it sums their volatile-leg
@@ -33,6 +39,7 @@ type poolPricer interface {
 type LiveTracker struct {
 	reader   poolReader
 	pricer   poolPricer
+	prices   priceProvider
 	iv       datasource.ImpliedVolSource
 	bn       *binance.Client
 	chain    datasource.Chain
@@ -58,6 +65,7 @@ type LiveTracker struct {
 func NewLiveTracker(
 	reader poolReader,
 	pricer poolPricer,
+	prices priceProvider,
 	iv datasource.ImpliedVolSource,
 	bn *binance.Client,
 	tokenIDs []int64,
@@ -68,6 +76,7 @@ func NewLiveTracker(
 	return &LiveTracker{
 		reader:     reader,
 		pricer:     pricer,
+		prices:     prices,
 		iv:         iv,
 		bn:         bn,
 		tokenIDs:   tokenIDs,
@@ -311,15 +320,17 @@ func (t *LiveTracker) priceLeg(ctx context.Context, report lp.PositionReport) tr
 	tl.price0 = legPrice(report.Symbol0, rp)
 	tl.price1 = legPrice(report.Symbol1, rp)
 
-	// Prefer Binance mark prices for hedged legs when a client is present.
-	if t.bn != nil {
+	// Prefer public Binance mark prices for assets with a listed perpetual. This
+	// path is keyless and independently cached, while the pool snapshot remains
+	// the fallback for stablecoins and assets Binance does not list.
+	if t.prices != nil {
 		if perp, ok := perpForSymbol(report.Symbol0); ok {
-			if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+			if price, err := t.prices.Price(ctx, perp); err == nil && price > 0 {
 				tl.price0 = price
 			}
 		}
 		if perp, ok := perpForSymbol(report.Symbol1); ok {
-			if price, err := t.bn.GetMarkPrice(ctx, perp); err == nil && price > 0 {
+			if price, err := t.prices.Price(ctx, perp); err == nil && price > 0 {
 				tl.price1 = price
 			}
 		}
