@@ -10,8 +10,7 @@ A crypto liquidity-pool analyzer that does two things:
    simplified position per asset (target vs. current short, drift, PnL). The
    hedge defaults to **token/USDC** perps, falling back to token/USDT only when
    no USDC contract is listed.
-2. **Auto-scans the most profitable pools across chains** — every
-   `SCAN_INTERVAL` it pulls the most active pools across multiple L1s and L2s
+2. **Scans pools across chains** on startup and manual request. It pulls the most active pools across multiple L1s and L2s
    and ranks them by how much their fee yield beats the assets' **price
    volatility**, with a focus on Aerodrome, Velodrome, PancakeSwap and Uniswap.
 
@@ -335,7 +334,7 @@ The dashboard's **Tracked position & hedge** panel shows, side by side:
   **realized σ** vs **Deribit IV**, fee APR and net edge.
 
 `internal/position` defines a `Tracker` with a **live** implementation
-(`internal/lp` reader + GeckoTerminal pricing + Deribit IV + `internal/binance`
+(`internal/lp` reader + on-chain spot pricing + cached pool analysis + `internal/binance`
 hedge read) and a **demo** implementation. The hedge is **read/advisory by
 default** (`HEDGE_DRY_RUN=true`); actually placing orders stays in the
 standalone `cmd/hedge` tool.
@@ -414,9 +413,9 @@ uncollected, what a harvest realizes now) and **Total fees since start**
 
 ```
 cmd/server          HTTP server entrypoint (config via env)
-internal/scanner    periodic scan loop + position refresh + snapshot store
+internal/scanner    startup/manual pool scans + periodic position refresh
 internal/analyzer   the fee-vs-volatility model (+ tests)
-internal/position   single-position tracker + perp hedge (live/demo, + tests)
+internal/position   portfolio tracker + on-chain valuation + analysis cache
 internal/datasource pool/price providers behind a common interface:
                       - geckoterminal.go  live pools + single-pool + OHLCV
                       - deribit.go        options-implied vol (DVOL)
@@ -424,20 +423,21 @@ internal/datasource pool/price providers behind a common interface:
 internal/lp         on-chain Aerodrome position reader (Uniswap V3-style)
 internal/onchain    on-chain v3 pool state probe (active liquidity) via Alchemy RPC
 internal/binance    Binance futures read + short sync
+internal/marketdata public Binance USD anchors with memory/PostgreSQL cache
+internal/metrics    outbound market-data request and cache counters
 internal/api        JSON API + static file serving
 web/assets          dashboard (HTML/CSS/JS, embedded via go:embed)
 ```
 
-The scanner runs one scan on startup, then every `SCAN_INTERVAL`. Results are
-held in memory and served to the dashboard, which polls every 5s and shows a
-live countdown to the next scan. A **Scan now** button forces an out-of-band
-scan.
+The scanner runs once on startup and when **Scan now** is clicked; failed chains
+are retried separately. Position tracking updates independently every
+`POSITION_INTERVAL` (default 3m). The dashboard polls the local API every 5s.
 
 ## Running
 
 ```bash
 # Offline demo data (default) — no API keys, no network needed:
-go run ./cmd/server
+DATA_SOURCE=demo go run ./cmd/server
 # open http://localhost:8080
 
 # Live data from GeckoTerminal (pools/OHLCV) + Deribit (implied vol):
@@ -448,13 +448,33 @@ docker compose up -d postgres
 DATABASE_URL='postgres://lp_tracker:lp_tracker_dev@localhost:5432/lp_tracker?sslmode=disable' DATA_SOURCE=live RPC_URL='https://…' go run ./cmd/server
 ```
 
-With `DATABASE_URL` configured, a position refresh reads its latest pool
-snapshot from PostgreSQL (default freshness: 6 hours) instead of calling
-GeckoTerminal. Listed volatile assets are valued with Binance's **public**
-USD-M futures mark-price endpoint, which does not require an API key; those
-observations are cached in PostgreSQL for one minute by default. Stablecoins
-and assets unavailable on Binance fall back to the persisted pool price.
-Position accounting snapshots are also persisted and rolled into a 90-day UTC
+Position valuation uses on-chain `sqrtPriceX96` and token decimals to obtain the
+pool's token1/token0 spot ratio. A known stablecoin is an explicit USD 1 parity
+assumption (including depeg risk), shown in the dashboard. For volatile/volatile
+pairs, a direct asset or 1:1 wrapper uses a public Binance USDT mark-price anchor
+(USDT/USD parity assumed); the other token is derived using the pool ratio.
+Yield-bearing wrappers such as wstETH are never assigned the ETH mark price 1:1.
+LP spot valuation and the hedge's own mark price are displayed separately.
+
+Pool metadata/OHLCV are refreshed in a separate, bounded background request and
+cached for `POOL_CACHE_TTL` (default 6h). Cold, expired or unavailable Gecko data
+does not block valuation. Old analysis is labelled stale; missing analysis is
+labelled pending. Deribit IV remains in the pool scanner. The scanner still
+performs its startup scan and manual scans independently.
+
+Binance anchors are cached for `PRICE_CACHE_TTL` (default 1m), retaining their
+original timestamps. Expired anchors are rejected when refresh fails. In-memory
+caches work without PostgreSQL; `DATABASE_URL` adds persistence. Database failures
+do not disable the public price feed. With no usable USD anchor, token quantities
+and exposure remain visible while USD accounting pauses, preventing false losses.
+
+Price provenance, observation age and parity assumptions appear on the dashboard.
+`GET /api/metrics` exposes process-lifetime request/cache counters; Gecko includes
+both the pool scanner and background analysis, and Binance counts public price
+requests only (account/hedge API requests are excluded). The dashboard shows these
+counters to help measure API usage.
+
+With PostgreSQL configured, position accounting snapshots are also persisted and rolled into a 90-day UTC
 daily-return table (LP value change, swap fees, gauge rewards when available,
 hedge P&L, funding, and trading fees paid).
 
@@ -466,6 +486,7 @@ hedge P&L, funding, and trading fees paid).
 
 | Variable | Default | Description |
 |---|---|---|
+| `HOST` | all interfaces | bind address; set `127.0.0.1` for local testing |
 | `PORT` | `8080` | HTTP listen port |
 | `DATA_SOURCE` | `demo` | `demo` or `live` |
 | `SCAN_INTERVAL` | `10m` | wait between scans (`30s`, `5m`, `1h`, …) |

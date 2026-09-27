@@ -9,6 +9,7 @@ package datasource
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 )
@@ -43,6 +44,7 @@ var DefaultChains = []Chain{
 
 // RawPool is one pool's market data as returned by a Source, before analysis.
 type RawPool struct {
+	ObservedAt    time.Time `json:"observedAt"`
 	Chain         string    `json:"chain"`         // display name
 	ChainSlug     string    `json:"chainSlug"`     // provider slug
 	ChainKind     ChainKind `json:"chainKind"`     // L1 / L2

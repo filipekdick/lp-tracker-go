@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/filipekdick/lp-tracker-go/internal/metrics"
 	"io"
 	"io/fs"
 	"net/http"
@@ -32,6 +33,10 @@ func New(sc *scanner.Scanner, static fs.FS) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(metrics.Snapshot())
+	})
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/pools", s.handlePools)
 	mux.HandleFunc("/api/pools/", s.handlePoolDetail)

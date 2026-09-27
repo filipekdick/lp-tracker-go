@@ -14,6 +14,7 @@ package position
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/filipekdick/lp-tracker-go/internal/analyzer"
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
@@ -51,12 +52,17 @@ type PositionLeg struct {
 	UncollectedFees0 float64 `json:"uncollectedFees0"`
 	UncollectedFees1 float64 `json:"uncollectedFees1"`
 
-	ValueUSD     float64 `json:"valueUsd"`
-	Price0       float64 `json:"price0"`
-	Price1       float64 `json:"price1"`
-	FeeTier      float64 `json:"feeTier"`
-	TVLUSD       float64 `json:"tvlUsd"`
-	Volume24hUSD float64 `json:"volume24hUsd"`
+	Price0Info         PriceInfo `json:"price0Info"`
+	Price1Info         PriceInfo `json:"price1Info"`
+	ValuationAvailable bool      `json:"valuationAvailable"`
+	AnalysisUpdatedAt  time.Time `json:"analysisUpdatedAt"`
+	AnalysisStatus     string    `json:"analysisStatus"`
+	ValueUSD           float64   `json:"valueUsd"`
+	Price0             float64   `json:"price0"`
+	Price1             float64   `json:"price1"`
+	FeeTier            float64   `json:"feeTier"`
+	TVLUSD             float64   `json:"tvlUsd"`
+	Volume24hUSD       float64   `json:"volume24hUsd"`
 
 	Analysis analyzer.Result `json:"analysis"`
 	Error    string          `json:"error,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/filipekdick/lp-tracker-go/internal/metrics"
 	"io"
 	"net/http"
 	"sort"
@@ -240,6 +241,7 @@ func (g *GeckoTerminal) getJSON(ctx context.Context, url string, dst any) error 
 		req.Header.Set("x-cg-demo-api-key", g.apiKey)
 	}
 
+	metrics.Inc("gecko_requests")
 	res, err := g.http.Do(req)
 	if err != nil {
 		return err

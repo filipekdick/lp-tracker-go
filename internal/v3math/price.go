@@ -1,6 +1,9 @@
 package v3math
 
-import "math"
+import (
+	"math"
+	"math/big"
+)
 
 // PriceAtTick returns the human-readable price of token0 denominated in token1
 // (i.e. token1 per token0) at the given tick, accounting for token decimals.
@@ -68,4 +71,18 @@ func RangePrices(tickLower, tickUpper, tickNow int64, dec0, dec1 uint8) RangeInf
 		info.WithinPct = float64(tickNow-tickLower) / float64(tickUpper-tickLower) * 100.0
 	}
 	return info
+}
+
+// PriceAtSqrtRatio returns token1 units per token0 from the exact pool ratio.
+func PriceAtSqrtRatio(sqrt *big.Int, dec0, dec1 uint8) float64 {
+	if sqrt == nil || sqrt.Sign() <= 0 {
+		return 0
+	}
+	r := new(big.Rat).SetFrac(new(big.Int).Mul(sqrt, sqrt), new(big.Int).Lsh(big.NewInt(1), 192))
+	f, _ := r.Float64()
+	price := f * math.Pow10(int(dec0)-int(dec1))
+	if math.IsNaN(price) || math.IsInf(price, 0) || price <= 0 {
+		return 0
+	}
+	return price
 }

@@ -97,7 +97,7 @@ func main() {
 	go sc.Run(ctx)
 
 	server := &http.Server{
-		Addr:              ":" + envStr("PORT", "8080"),
+		Addr:              envStr("HOST", "") + ":" + envStr("PORT", "8080"),
 		Handler:           api.New(sc, web.Assets()).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -183,8 +183,16 @@ func buildTracker(source datasource.Source, implied datasource.ImpliedVolSource,
 	upper := envFloat("HEDGE_MARKET_THRESHOLD", envFloat("HEDGE_DRIFT_THRESHOLD", 0.06))
 	strategy := &hedger.Strategy{LowerThreshold: lower, UpperThreshold: upper}
 
-	poolPricer := position.NewCachedPoolPricer(gecko, db, envDuration("POOL_CACHE_TTL", 6*time.Hour))
-	prices := marketdata.NewBinanceMarkPrices(os.Getenv("BINANCE_FUTURES_URL"), db, envDuration("PRICE_CACHE_TTL", time.Minute))
+	var poolStore position.PoolSnapshotStore
+	var priceStore marketdata.PriceStore
+	if db != nil {
+		poolStore, priceStore = db, db
+	}
+	poolPricer := position.NewCachedPoolPricer(gecko, poolStore, envDuration("POOL_CACHE_TTL", 6*time.Hour))
+	prices := marketdata.NewBinanceMarkPrices(os.Getenv("BINANCE_FUTURES_URL"), priceStore, envDuration("PRICE_CACHE_TTL", time.Minute))
+	if db == nil {
+		return position.NewLiveTracker(reader, poolPricer, prices, implied, bn, tokenIDs, base, dryRun, strategy, nil)
+	}
 	return position.NewLiveTracker(reader, poolPricer, prices, implied, bn, tokenIDs, base, dryRun, strategy, db)
 }
 

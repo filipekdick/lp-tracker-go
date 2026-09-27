@@ -81,19 +81,20 @@ CREATE INDEX IF NOT EXISTS position_snapshots_history_idx ON position_snapshots 
 func (p *Postgres) Close() error { return p.db.Close() }
 
 // LatestPrice returns a price no older than maxAge.
-func (p *Postgres) LatestPrice(ctx context.Context, symbol string, maxAge time.Duration) (float64, bool, error) {
+func (p *Postgres) LatestPrice(ctx context.Context, symbol string, maxAge time.Duration) (float64, time.Time, bool, error) {
 	var price float64
+	var observedAt time.Time
 	err := p.db.QueryRowContext(ctx, `
-SELECT price_usd FROM market_prices
+SELECT price_usd, observed_at FROM market_prices
 WHERE symbol = $1 AND observed_at >= $2
-ORDER BY observed_at DESC LIMIT 1`, symbol, time.Now().Add(-maxAge)).Scan(&price)
+ORDER BY observed_at DESC LIMIT 1`, symbol, time.Now().Add(-maxAge)).Scan(&price, &observedAt)
 	if err == sql.ErrNoRows {
-		return 0, false, nil
+		return 0, time.Time{}, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("load price %s: %w", symbol, err)
+		return 0, time.Time{}, false, fmt.Errorf("load price %s: %w", symbol, err)
 	}
-	return price, true, nil
+	return price, observedAt, true, nil
 }
 
 func (p *Postgres) SavePrice(ctx context.Context, symbol, source string, price float64, observedAt time.Time) error {

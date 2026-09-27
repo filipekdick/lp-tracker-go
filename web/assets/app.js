@@ -153,6 +153,9 @@ async function getJSON(url, opts) {
 }
 
 async function refresh() {
+  getJSON("/api/metrics").then(m => {
+    document.getElementById("request-counts").textContent = `Requests: Gecko ${m.gecko_requests || 0} · Binance prices ${m.binance_price_requests || 0} · Price cache hits ${m.binance_price_cache_hits || 0}`;
+  }).catch(() => {});
   try {
     if (state.page === "positions") {
       const [meta, posResp] = await Promise.all([
@@ -254,6 +257,22 @@ function driftCell(h) {
 // summed across them (synthetics folded into their underlying), which the single
 // simplified short hedges. Returns "" for a single position so the original
 // three-card layout is unchanged.
+function safeText(value) {
+  return String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function priceAge(at) {
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) && ms > 0 ? Math.max(0, Math.floor((Date.now() - ms) / 1000)) + "s ago" : "no market observation";
+}
+function priceDetails(symbol, info) {
+  if (!info?.source) return "";
+  const labels = {onchain_sqrt_price:"Pool spot", stablecoin_assumption:"Assumed parity", binance_mark_usdt:"Binance mark reference"};
+  return `<p class="hint">${safeText(symbol)}: ${labels[info.source] || safeText(info.source)} · ${priceAge(info.observedAt)}${info.cached ? " · cached" : ""}${info.stale ? " · STALE" : ""}${info.anchorSource ? " · anchor: " + safeText(labels[info.anchorSource] || info.anchorSource) + " (" + priceAge(info.anchorObservedAt) + ")" : ""}${info.assumption ? " · " + safeText(info.assumption) : ""}</p>`;
+}
+function valuationDetails(p) {
+ return priceDetails(p.symbol0, p.price0Info) + priceDetails(p.symbol1, p.price1Info);
+}
+
 function renderPortfolioCard(p) {
   const positions = p.positions || [];
   const exposures = p.exposures || [];
@@ -269,9 +288,9 @@ function renderPortfolioCard(p) {
         : "—";
       return `<div class="liq-row">
         <div class="liq-sym">${pos.poolName} ${inPill}</div>
-        <div class="liq-col"><span class="liq-amt">#${pos.tokenId}</span><span class="liq-usd">${fmt.usd(pos.valueUsd)}</span></div>
+        <div class="liq-col"><span class="liq-amt">#${pos.tokenId}</span><span class="liq-usd">${pos.valuationAvailable === false ? "Unavailable" : fmt.usd(pos.valueUsd)}</span></div>
         <div class="liq-col"><span class="liq-amt">${pos.protocol || ""}</span><span class="liq-usd">APR ${apr}</span></div>
-      </div>`;
+      </div>${valuationDetails(pos)}`;
     })
     .join("");
 
@@ -358,7 +377,7 @@ function renderPosition() {
     hodlV1 = null;
   let netPnl = null,
     roi = null;
-  if (p.initialState) {
+  if (p.initialState && p.valuationAvailable !== false) {
     hodlV0 = (p.initialState.amount0 || 0) * price0;
     hodlV1 = (p.initialState.amount1 || 0) * price1;
     hodlVal = hodlV0 + hodlV1;
@@ -451,8 +470,10 @@ function renderPosition() {
     <div class="kv liq-total"><span class="k">Impermanent loss</span><span class="v">${il != null ? `<span class="${cls(il)}">${fmt.usd(il)}</span>` : "—"}</span></div>
     <div class="kv liq-total" style="margin-top: 8px; font-weight: bold; color: var(--fg);">
       <span class="k">Live Token Prices</span>
-      <span class="v">${p.symbol0} ${fmt.price(p.price0)} &nbsp;&middot;&nbsp; ${p.symbol1} ${fmt.price(p.price1)}</span>
+      <span class="v">${p.symbol0} ${fmt.price(p.valuationAvailable === false ? null : p.price0)} &nbsp;&middot;&nbsp; ${p.symbol1} ${fmt.price(p.valuationAvailable === false ? null : p.price1)}</span>
     </div>
+    ${valuationDetails(p)}
+    ${p.analysisStatus ? `<p class="hint">Pool analysis: ${safeText(p.analysisStatus)} · ${priceAge(p.analysisUpdatedAt)}</p>` : ""}
     ${rangeBlock}
     <p class="hint" style="margin-top:8px">Tick ${p.tickLower} … ${p.tickUpper} (now ${p.tickNow}) · Pool TVL ${fmt.usd(p.tvlUsd)}</p>
   </div>`;
@@ -589,7 +610,9 @@ function renderPosition() {
   // across them (synthetics folded in), which the single simplified short hedges.
   const portfolio = renderPortfolioCard(p);
 
-  document.getElementById("position-summary").innerHTML = summaryCards;
+  document.getElementById("position-summary").innerHTML = p.valuationAvailable === false
+    ? '<div class="pcard"><h3>USD valuation unavailable</h3><p>Token quantities and hedge exposure remain available. Accounting resumes when prices recover.</p></div>'
+    : summaryCards;
   // Second row: Liquidity Position (with range details), Fees & Rewards (with the
   // fee-vs-volatility analysis), the Perp hedge, and — when several positions are
   // tracked — the aggregated portfolio card.

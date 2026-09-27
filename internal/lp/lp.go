@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -20,19 +21,21 @@ import (
 
 // PositionReport bundles everything we want to know about a position.
 type PositionReport struct {
-	TokenID     int64
-	NFPMAddress string
-	PoolAddress string
-	Symbol0     string
-	Symbol1     string
-	Decimals0   uint8
-	Decimals1   uint8
-	Amount0     float64
-	Amount1     float64
-	TickLower   int64
-	TickUpper   int64
-	TickNow     int64
-	InRange     bool
+	TokenID      int64
+	NFPMAddress  string
+	PoolAddress  string
+	Symbol0      string
+	Symbol1      string
+	Decimals0    uint8
+	Decimals1    uint8
+	Amount0      float64
+	Amount1      float64
+	TickLower    int64
+	TickUpper    int64
+	SqrtPriceX96 *big.Int
+	ObservedAt   time.Time
+	TickNow      int64
+	InRange      bool
 
 	// UncollectedFees0/1 are the fees currently owed to the position but not yet
 	// withdrawn — the live, claimable balance from the simulated collect() call.
@@ -162,19 +165,21 @@ func (r *Reader) ReadPosition(tokenID int64) (PositionReport, error) {
 	tickUpper := position.TickUpper.Int64()
 
 	report := PositionReport{
-		TokenID:     tokenID,
-		NFPMAddress: successAddr.Hex(),
-		PoolAddress: poolAddr.Hex(),
-		Symbol0:     sym0,
-		Symbol1:     sym1,
-		Decimals0:   dec0,
-		Decimals1:   dec1,
-		Amount0:     format.TokenAmount(amount0, dec0),
-		Amount1:     format.TokenAmount(amount1, dec1),
-		TickLower:   tickLower,
-		TickUpper:   tickUpper,
-		TickNow:     tickNow,
-		InRange:     tickNow >= tickLower && tickNow <= tickUpper,
+		TokenID:      tokenID,
+		NFPMAddress:  successAddr.Hex(),
+		PoolAddress:  poolAddr.Hex(),
+		Symbol0:      sym0,
+		Symbol1:      sym1,
+		Decimals0:    dec0,
+		Decimals1:    dec1,
+		Amount0:      format.TokenAmount(amount0, dec0),
+		Amount1:      format.TokenAmount(amount1, dec1),
+		TickLower:    tickLower,
+		TickUpper:    tickUpper,
+		TickNow:      tickNow,
+		SqrtPriceX96: new(big.Int).Set(slot0.SqrtPriceX96),
+		ObservedAt:   time.Now(),
+		InRange:      tickNow >= tickLower && tickNow <= tickUpper,
 		// Start from the position's static tokensOwed; the collect() simulation
 		// below refines this to the live claimable balance when it succeeds.
 		UncollectedFees0: format.TokenAmount(position.TokensOwed0, dec0),

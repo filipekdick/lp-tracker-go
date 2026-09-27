@@ -88,12 +88,17 @@ type TrackedPosition struct {
 	TokensOwed1      float64 `json:"tokensOwed1"`
 
 	// Valuation and pool market data.
-	ValueUSD     float64 `json:"valueUsd"`
-	Price0       float64 `json:"price0"` // current USD price of token0
-	Price1       float64 `json:"price1"` // current USD price of token1
-	FeeTier      float64 `json:"feeTier"`
-	TVLUSD       float64 `json:"tvlUsd"`
-	Volume24hUSD float64 `json:"volume24hUsd"`
+	Price0Info         PriceInfo `json:"price0Info"`
+	Price1Info         PriceInfo `json:"price1Info"`
+	ValuationAvailable bool      `json:"valuationAvailable"`
+	AnalysisUpdatedAt  time.Time `json:"analysisUpdatedAt"`
+	AnalysisStatus     string    `json:"analysisStatus"`
+	ValueUSD           float64   `json:"valueUsd"`
+	Price0             float64   `json:"price0"` // current USD price of token0
+	Price1             float64   `json:"price1"` // current USD price of token1
+	FeeTier            float64   `json:"feeTier"`
+	TVLUSD             float64   `json:"tvlUsd"`
+	Volume24hUSD       float64   `json:"volume24hUsd"`
 
 	// Fee-versus-volatility analysis for this pool.
 	Analysis analyzer.Result `json:"analysis"`

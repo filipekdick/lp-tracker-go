@@ -113,7 +113,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	// between another WETH/USDC and a wstETH/WETH (synthetic ETH) pool, so adding
 	// token IDs from the frontend visibly grows the portfolio and the hedge.
 	ids := t.TokenIDs()
-	primaryLeg := PositionLeg{
+	primaryLeg := PositionLeg{ValuationAvailable: true,
 		TokenID: ids[0], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
 		Protocol: rp.Protocol, DEX: rp.DEX, PoolAddress: rp.Address, PoolName: rp.Name,
 		Symbol0: "WETH", Symbol1: "USDC", Amount0: wethAmount, Amount1: usdcAmount,
@@ -130,7 +130,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 			// wstETH/WETH synthetic — ETH exposure via wstETH + WETH.
 			wst := 1.0 + rng.Float64()*1.2
 			w2 := 0.4 + rng.Float64()*0.8
-			leg = PositionLeg{
+			leg = PositionLeg{ValuationAvailable: true,
 				TokenID: ids[i], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
 				Protocol: "Aerodrome", DEX: "aerodrome_slipstream",
 				PoolAddress: "0x4d69971ccd4a636c403a3c1b00c85e99bb9b5606", PoolName: "wstETH / WETH",
@@ -144,7 +144,7 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 			// Another WETH/USDC position.
 			w := 1.0 + rng.Float64()*2.0
 			u := w * mark * (0.8 + rng.Float64()*0.3)
-			leg = PositionLeg{
+			leg = PositionLeg{ValuationAvailable: true,
 				TokenID: ids[i], Chain: rp.Chain, ChainSlug: rp.ChainSlug, ChainKind: rp.ChainKind,
 				Protocol: rp.Protocol, DEX: rp.DEX, PoolAddress: rp.Address, PoolName: rp.Name,
 				Symbol0: "WETH", Symbol1: "USDC", Amount0: w, Amount1: u,
@@ -185,23 +185,24 @@ func (t *DemoTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		Decimals0:   18, // WETH
 		Decimals1:   6,  // USDC
 		// Synthetic live claimable fees.
-		UncollectedFees0: 0.0042 + rng.Float64()*0.002,
-		UncollectedFees1: 8 + rng.Float64()*6,
-		TokensOwed0:      0.0042 + rng.Float64()*0.002,
-		TokensOwed1:      8 + rng.Float64()*6,
-		ValueUSD:         totalValue,
-		Price0:           mark,
-		Price1:           1,
-		FeeTier:          rp.FeeTier,
-		TVLUSD:           rp.TVLUSD,
-		Volume24hUSD:     rp.Volume24hUSD,
-		Analysis:         res,
-		Positions:        positions,
-		Exposures:        exposures,
-		Hedges:           []Hedge{hedge},
-		Hedge:            hedge,
-		Source:           "demo",
-		UpdatedAt:        time.Now(),
+		UncollectedFees0:   0.0042 + rng.Float64()*0.002,
+		UncollectedFees1:   8 + rng.Float64()*6,
+		TokensOwed0:        0.0042 + rng.Float64()*0.002,
+		TokensOwed1:        8 + rng.Float64()*6,
+		ValueUSD:           totalValue,
+		Price0:             mark,
+		Price1:             1,
+		FeeTier:            rp.FeeTier,
+		TVLUSD:             rp.TVLUSD,
+		Volume24hUSD:       rp.Volume24hUSD,
+		Analysis:           res,
+		Positions:          positions,
+		Exposures:          exposures,
+		Hedges:             []Hedge{hedge},
+		Hedge:              hedge,
+		ValuationAvailable: true,
+		Source:             "demo",
+		UpdatedAt:          time.Now(),
 	}
 
 	tp.fillRangePrices()

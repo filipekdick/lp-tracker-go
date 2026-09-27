@@ -15,6 +15,7 @@ import (
 	"github.com/filipekdick/lp-tracker-go/internal/datasource"
 	"github.com/filipekdick/lp-tracker-go/internal/hedger"
 	"github.com/filipekdick/lp-tracker-go/internal/lp"
+	"github.com/filipekdick/lp-tracker-go/internal/marketdata"
 )
 
 // poolReader is the slice of *lp.Reader the tracker needs (eases testing).
@@ -30,7 +31,7 @@ type poolPricer interface {
 // priceProvider supplies a current USD price for a Binance futures symbol.
 // The public Binance endpoint needs no API key.
 type priceProvider interface {
-	Price(ctx context.Context, symbol string) (float64, error)
+	Quote(ctx context.Context, symbol string) (marketdata.Quote, error)
 }
 
 // positionHistoryStore persists cumulative snapshots across process restarts.
@@ -222,6 +223,13 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		}
 	}
 
+	if !tp.ValuationAvailable {
+		tp.Error = "Portfolio USD valuation incomplete; accounting paused until prices recover"
+		tp.InitialState, tp.History = t.initialState, t.history
+		tp.DailyReturns = BuildDailyReturns(t.initialState, t.history)
+		return tp, nil
+	}
+
 	// Update the per-position LP fee ledgers in TOKEN UNITS (harvest detection)
 	// and sum across the portfolio, priced at each pool's current prices.
 	feesToCollect, feesTotal := 0.0, 0.0
@@ -266,7 +274,7 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 	tp.FeesToCollectUSD = feesToCollect
 	tp.FeesTotalUSD = feesTotal
 
-	anyPriced := tp.ValueUSD > 0 || tp.Error == ""
+	anyPriced := tp.ValuationAvailable
 	if t.initialState == nil && anyPriced {
 		t.initialState = &Snapshot{
 			Timestamp:           snap.Timestamp,
@@ -284,7 +292,7 @@ func (t *LiveTracker) Track(ctx context.Context) (TrackedPosition, error) {
 		}
 	}
 
-	if t.initialState != nil {
+	if t.initialState != nil && anyPriced {
 		comps := PnLComponents{
 			LPChange:        snap.ValueUSD - t.initialState.ValueUSD,
 			HedgeUnrealized: snap.HedgePnL - t.initialState.HedgePnL,
@@ -378,40 +386,30 @@ func (t *LiveTracker) priceLeg(ctx context.Context, report lp.PositionReport) tr
 		UncollectedFees1: report.UncollectedFees1,
 	}
 
-	rp, perr := t.pricer.PoolByAddress(ctx, t.chain, report.PoolAddress)
-	if perr != nil {
-		leg.Error = fmt.Sprintf("pool pricing unavailable: %v", perr)
-		tl.leg = withRangePrices(leg)
-		return tl
+	// Valuation never depends on pool metadata or candles.
+	tl.price0, tl.price1, leg.Price0Info, leg.Price1Info = t.valueOnChain(ctx, report)
+	leg.ValuationAvailable = validPrice(tl.price0) && validPrice(tl.price1)
+	tl.priced = leg.ValuationAvailable
+	if !tl.priced {
+		leg.Error = "USD valuation unavailable: missing pool ratio or fresh USD anchor"
 	}
-
-	tl.rp = rp
-	tl.priced = true
-	tl.price0 = legPrice(report.Symbol0, rp)
-	tl.price1 = legPrice(report.Symbol1, rp)
-
-	// Prefer public Binance mark prices for assets with a listed perpetual. This
-	// path is keyless and independently cached, while the pool snapshot remains
-	// the fallback for stablecoins and assets Binance does not list.
-	if t.prices != nil {
-		if perp, ok := perpForSymbol(report.Symbol0); ok {
-			if price, err := t.prices.Price(ctx, perp); err == nil && price > 0 {
-				tl.price0 = price
-			}
+	leg.AnalysisStatus = "unavailable"
+	if t.pricer != nil {
+		rp, err := t.pricer.PoolByAddress(ctx, t.chain, report.PoolAddress)
+		if err != nil {
+			leg.AnalysisStatus = err.Error()
+		} else {
+			leg.AnalysisStatus = "fresh"
 		}
-		if perp, ok := perpForSymbol(report.Symbol1); ok {
-			if price, err := t.prices.Price(ctx, perp); err == nil && price > 0 {
-				tl.price1 = price
-			}
+		if !rp.ObservedAt.IsZero() {
+			tl.rp = rp
+			leg.Protocol, leg.DEX, leg.FeeTier = rp.Protocol, rp.DEX, rp.FeeTier
+			leg.TVLUSD, leg.Volume24hUSD = rp.TVLUSD, rp.Volume24hUSD
+			leg.AnalysisUpdatedAt = rp.ObservedAt
+			// Deribit remains in the independent pool scanner, outside valuation.
+			leg.Analysis = runAnalysis(ctx, rp, nil)
 		}
 	}
-
-	leg.Protocol = rp.Protocol
-	leg.DEX = rp.DEX
-	leg.FeeTier = rp.FeeTier
-	leg.TVLUSD = rp.TVLUSD
-	leg.Volume24hUSD = rp.Volume24hUSD
-	leg.Analysis = runAnalysis(ctx, rp, t.iv)
 	leg.Price0 = tl.price0
 	leg.Price1 = tl.price1
 	leg.ValueUSD = report.Amount0*tl.price0 + report.Amount1*tl.price1
@@ -440,8 +438,11 @@ func withRangePrices(leg PositionLeg) PositionLeg {
 // compatibility with the single-position dashboard cards, while ValueUSD,
 // Positions and (later) Exposures describe the whole portfolio.
 func buildPortfolio(legs []trackedLeg) TrackedPosition {
-	tp := TrackedPosition{}
+	tp := TrackedPosition{ValuationAvailable: true}
 	for i, l := range legs {
+		if !l.priced {
+			tp.ValuationAvailable = false
+		}
 		tp.Positions = append(tp.Positions, l.leg)
 		tp.ValueUSD += l.value
 		if i == 0 {
@@ -472,6 +473,8 @@ func buildPortfolio(legs []trackedLeg) TrackedPosition {
 			tp.UncollectedFees1 = primary.UncollectedFees1
 			tp.TokensOwed0 = primary.UncollectedFees0
 			tp.TokensOwed1 = primary.UncollectedFees1
+			tp.Price0Info, tp.Price1Info = primary.Price0Info, primary.Price1Info
+			tp.AnalysisUpdatedAt, tp.AnalysisStatus = primary.AnalysisUpdatedAt, primary.AnalysisStatus
 			tp.Price0 = primary.Price0
 			tp.Price1 = primary.Price1
 			tp.FeeTier = primary.FeeTier
@@ -514,6 +517,7 @@ func (t *LiveTracker) hedges(ctx context.Context, exposures []AssetExposure) []H
 	if len(exposures) == 0 {
 		return []Hedge{{
 			Available: false,
+			DryRun:    t.dryRun,
 			Note:      "no hedgeable (perp-listed) leg across tracked positions",
 		}}
 	}
@@ -619,6 +623,9 @@ func absf(x float64) float64 {
 }
 
 func (t *LiveTracker) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	if t.dryRun {
+		return fmt.Errorf("order cancellation disabled in dry-run mode")
+	}
 	if t.bn == nil {
 		return fmt.Errorf("binance client not connected")
 	}
