@@ -93,6 +93,21 @@ func TestAggregateExposuresFoldsSynthetics(t *testing.T) {
 	if ex[0].Asset != "ETH" {
 		t.Fatalf("expected ETH first, got %q", ex[0].Asset)
 	}
+
+	// When yield-bearing wrappers (e.g. wstETH) carry their on-chain USD price
+	// (~1.20x WETH), aggregateExposures scales their hedge amount by the exchange
+	// ratio so the ETH short isn't under-hedged.
+	pricedLegs := []PositionLeg{
+		{TokenID: 10, Symbol0: "wstETH", Symbol1: "WETH", Amount0: 10.0, Amount1: 2.0, Price0: 2400, Price1: 2000},
+	}
+	pricedEx := aggregateExposures(pricedLegs)
+	if len(pricedEx) != 1 || pricedEx[0].Asset != "ETH" {
+		t.Fatalf("expected 1 ETH exposure, got %+v", pricedEx)
+	}
+	// 10 wstETH * (2400/2000) + 2 WETH = 12.0 + 2.0 = 14.0 ETH equivalent.
+	if pricedEx[0].Amount != 14.0 {
+		t.Fatalf("priced wstETH/WETH hedge amount = %v, want 14.0", pricedEx[0].Amount)
+	}
 }
 
 func TestHedgeLegUnhedgeablePool(t *testing.T) {

@@ -47,13 +47,14 @@ var ConcBandKs = []float64{1, 2}
 
 // BandSim is the projected outcome for one ±kσ band.
 type BandSim struct {
-	APR                float64 `json:"apr"`                // projected fee APR for the deposit
-	DailyFeesUSD       float64 `json:"dailyFeesUsd"`       // projected fees/day for the deposit
-	ShareOfLiquidity   float64 `json:"share"`              // deposit's share of in-range liquidity
-	ActiveLiquidityUSD float64 `json:"activeLiquidityUsd"` // competing in-range liquidity (USD)
-	ConcentrationX     float64 `json:"concentrationX"`     // capital efficiency of the band vs full range
-	LowerPrice         float64 `json:"lowerPrice"`
-	UpperPrice         float64 `json:"upperPrice"`
+	APR                float64       `json:"apr"`                // projected fee APR for the deposit
+	DailyFeesUSD       float64       `json:"dailyFeesUsd"`       // projected fees/day for the deposit
+	ShareOfLiquidity   float64       `json:"share"`              // deposit's share of in-range liquidity
+	ActiveLiquidityUSD float64       `json:"activeLiquidityUsd"` // competing in-range liquidity (USD)
+	ConcentrationX     float64       `json:"concentrationX"`     // capital efficiency of the band vs full range
+	LowerPrice         float64       `json:"lowerPrice"`
+	UpperPrice         float64       `json:"upperPrice"`
+	Viability          BandViability `json:"viability"`          // dynamic concentrated LVR + hedge friction viability
 }
 
 // ConcentratedSim is the concentrated-APR projection for a pool, computed for the
@@ -156,6 +157,7 @@ func onchainSim(st onchain.PoolState, in ConcentratedInput, horizon float64) *Co
 			ConcentrationX:     ConcentrationFactor(delta),
 			LowerPrice:         lower,
 			UpperPrice:         upper,
+			Viability:          EvaluateBand(apr, in.RealizedVol, delta, DefaultHedgeDriftThreshold, DefaultHedgeExecFee, 0),
 		}
 	}
 	return &ConcentratedSim{Source: "onchain", DepositUSD: ConcDepositUSD, Bands: bands}
@@ -200,6 +202,7 @@ func estimatedSim(in ConcentratedInput, horizon float64) *ConcentratedSim {
 			ConcentrationX:     cYou,
 			LowerPrice:         lower,
 			UpperPrice:         upper,
+			Viability:          EvaluateBand(apr, in.RealizedVol, deltaYou, DefaultHedgeDriftThreshold, DefaultHedgeExecFee, 0),
 		}
 	}
 	return &ConcentratedSim{Source: "estimated", DepositUSD: ConcDepositUSD, Bands: bands}

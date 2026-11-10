@@ -285,7 +285,9 @@ func hedgeLeg(sym0, sym1 string, amt0, amt1 float64) (asset string, amount float
 }
 
 // runAnalysis runs the fee-vs-volatility model over a pool, attaching implied
-// volatility for the base asset when the IV source has it.
+// volatility for the pool (cross-implied vol when both legs have distinct
+// Deribit IVs such as WETH/cbBTC, or single-leg IV for Token/Stable pairs
+// regardless of whether the volatile token is base or quote).
 func runAnalysis(ctx context.Context, rp datasource.RawPool, iv datasource.ImpliedVolSource) analyzer.Result {
 	in := analyzer.Input{
 		FeeTier:        rp.FeeTier,
@@ -296,8 +298,17 @@ func runAnalysis(ctx context.Context, rp datasource.RawPool, iv datasource.Impli
 		Bars:           rp.OHLC,
 	}
 	if iv != nil {
-		if v, ok := iv.ImpliedVol(ctx, rp.BaseSymbol); ok {
-			in.ImpliedVol = v
+		iv0, ok0 := iv.ImpliedVol(ctx, rp.BaseSymbol)
+		iv1, ok1 := iv.ImpliedVol(ctx, rp.QuoteSymbol)
+		switch {
+		case ok0 && ok1 && datasource.NormalizeSymbol(rp.BaseSymbol) != datasource.NormalizeSymbol(rp.QuoteSymbol):
+			in.ImpliedVol = analyzer.CrossImpliedVol(iv0, iv1, analyzer.DefaultCrossCorrelation)
+			in.HasImplied = in.ImpliedVol > 0
+		case ok0:
+			in.ImpliedVol = iv0
+			in.HasImplied = true
+		case ok1:
+			in.ImpliedVol = iv1
 			in.HasImplied = true
 		}
 	}

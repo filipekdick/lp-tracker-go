@@ -71,9 +71,10 @@ type PositionLeg struct {
 // ExposureSource attributes a slice of an aggregated exposure back to the LP
 // position (and the exact pool token, e.g. "wstETH") it came from.
 type ExposureSource struct {
-	TokenID int64   `json:"tokenId"`
-	Symbol  string  `json:"symbol"` // the original pool token symbol
-	Amount  float64 `json:"amount"` // units of that token in this position
+	TokenID     int64   `json:"tokenId"`
+	Symbol      string  `json:"symbol"`      // the original pool token symbol
+	Amount      float64 `json:"amount"`      // raw units of that token in this position
+	HedgeAmount float64 `json:"hedgeAmount"` // perp-equivalent units after exchange-ratio conversion
 }
 
 // AssetExposure is the summed volatile-leg exposure of ONE underlying asset
@@ -83,19 +84,63 @@ type AssetExposure struct {
 	Asset         string           `json:"asset"`         // normalized asset, e.g. "ETH"
 	DisplaySymbol string           `json:"displaySymbol"` // representative pool symbol, e.g. "WETH"
 	Perp          string           `json:"perp"`          // resolved perp symbol, e.g. "ETHUSDC"
-	Amount        float64          `json:"amount"`        // total units across all positions
+	Amount        float64          `json:"amount"`        // total perp-equivalent units across all positions
 	Sources       []ExposureSource `json:"sources"`       // per-position breakdown
 }
 
+// isYieldBearingWrapper reports whether sym is a liquid-staking/yield-bearing
+// derivative whose exchange rate against its underlying asset drifts above 1:1.
+func isYieldBearingWrapper(sym string) bool {
+	switch strings.ToUpper(strings.TrimSpace(sym)) {
+	case "WSTETH", "CBETH", "RETH", "WEETH":
+		return true
+	default:
+		return false
+	}
+}
+
+// hedgeEquivalentUnits converts raw LP token units into perp base-asset units
+// using the token's USD price vs. the underlying perp asset's USD price when
+// the token is a yield-bearing wrapper (e.g. 1 wstETH ≈ 1.18 ETH). Direct 1:1
+// assets (WETH, cbBTC, WBTC) or unpriced legs return rawAmount unchanged.
+func hedgeEquivalentUnits(sym string, rawAmount, tokenPriceUSD, basePerpPriceUSD float64) float64 {
+	if rawAmount <= 0 {
+		return 0
+	}
+	if isYieldBearingWrapper(sym) && tokenPriceUSD > 0 && basePerpPriceUSD > 0 {
+		return rawAmount * (tokenPriceUSD / basePerpPriceUSD)
+	}
+	return rawAmount
+}
+
 // aggregateExposures sums the hedgeable volatile-leg units of every position by
-// normalized asset, folding synthetics together (WETH + wstETH -> ETH). It
+// normalized asset, folding synthetics together (WETH + wstETH -> ETH) and
+// scaling yield-bearing wrappers by their exchange ratio when priced. It
 // returns one AssetExposure per asset, ordered by descending total units so the
 // largest exposure leads. Stable legs and assets without a listed perp are
 // skipped.
 func aggregateExposures(legs []PositionLeg) []AssetExposure {
 	byAsset := map[string]*AssetExposure{}
 
-	add := func(tokenID int64, sym string, amt float64) {
+	// Discover reference USD prices for direct (1:1) underlying assets across the
+	// portfolio so yield-bearing wrappers (wstETH, cbETH, ...) can be converted
+	// into perp-equivalent units even when paired against a stablecoin.
+	anchorPrices := map[string]float64{}
+	recordAnchor := func(sym string, price float64) {
+		if price <= 0 || isYieldBearingWrapper(sym) || stableSymbols[strings.ToUpper(strings.TrimSpace(sym))] {
+			return
+		}
+		norm := datasource.NormalizeSymbol(sym)
+		if anchorPrices[norm] <= 0 {
+			anchorPrices[norm] = price
+		}
+	}
+	for _, leg := range legs {
+		recordAnchor(leg.Symbol0, leg.Price0)
+		recordAnchor(leg.Symbol1, leg.Price1)
+	}
+
+	add := func(tokenID int64, sym string, amt, priceUSD float64) {
 		if amt <= 0 {
 			return
 		}
@@ -107,18 +152,24 @@ func aggregateExposures(legs []PositionLeg) []AssetExposure {
 			return
 		}
 		norm := datasource.NormalizeSymbol(sym)
+		equivAmt := hedgeEquivalentUnits(sym, amt, priceUSD, anchorPrices[norm])
 		ex, has := byAsset[norm]
 		if !has {
 			ex = &AssetExposure{Asset: norm, DisplaySymbol: sym, Perp: perp}
 			byAsset[norm] = ex
 		}
-		ex.Amount += amt
-		ex.Sources = append(ex.Sources, ExposureSource{TokenID: tokenID, Symbol: sym, Amount: amt})
+		ex.Amount += equivAmt
+		ex.Sources = append(ex.Sources, ExposureSource{
+			TokenID:     tokenID,
+			Symbol:      sym,
+			Amount:      amt,
+			HedgeAmount: equivAmt,
+		})
 	}
 
 	for _, leg := range legs {
-		add(leg.TokenID, leg.Symbol0, leg.Amount0)
-		add(leg.TokenID, leg.Symbol1, leg.Amount1)
+		add(leg.TokenID, leg.Symbol0, leg.Amount0, leg.Price0)
+		add(leg.TokenID, leg.Symbol1, leg.Amount1, leg.Price1)
 	}
 
 	out := make([]AssetExposure, 0, len(byAsset))

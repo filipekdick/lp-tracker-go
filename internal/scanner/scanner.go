@@ -429,8 +429,17 @@ func (s *Scanner) analyze(ctx context.Context, raw []datasource.RawPool, probeBu
 			Bars:           rp.OHLC,
 		}
 		if s.implied != nil {
-			if iv, ok := s.implied.ImpliedVol(ctx, rp.BaseSymbol); ok {
-				in.ImpliedVol = iv
+			iv0, ok0 := s.implied.ImpliedVol(ctx, rp.BaseSymbol)
+			iv1, ok1 := s.implied.ImpliedVol(ctx, rp.QuoteSymbol)
+			switch {
+			case ok0 && ok1 && datasource.NormalizeSymbol(rp.BaseSymbol) != datasource.NormalizeSymbol(rp.QuoteSymbol):
+				in.ImpliedVol = analyzer.CrossImpliedVol(iv0, iv1, analyzer.DefaultCrossCorrelation)
+				in.HasImplied = in.ImpliedVol > 0
+			case ok0:
+				in.ImpliedVol = iv0
+				in.HasImplied = true
+			case ok1:
+				in.ImpliedVol = iv1
 				in.HasImplied = true
 			}
 		}

@@ -145,3 +145,142 @@ func ExpectedTimeInRangeDays(k, horizonDays float64) float64 {
 	}
 	return k * k * horizonDays
 }
+
+// DefaultHedgeDriftThreshold and DefaultHedgeExecFee are the default execution
+// parameters used when evaluating a concentrated band's net viability with
+// dynamic delta-hedging on perpetual futures.
+const (
+	DefaultHedgeDriftThreshold = 0.03   // 3% drift trigger
+	DefaultHedgeExecFee        = 0.0003 // 3 bps blended maker/taker fee
+	DefaultCrossCorrelation    = 0.80   // default ETH/BTC log-return correlation
+)
+
+// BandViability holds the concentrated net-edge and breakeven metrics for a
+// specific ±delta range band once concentration C(delta), dynamic hedge
+// rebalancing friction, and perp funding are accounted for.
+type BandViability struct {
+	Delta              float64 `json:"delta"`              // log half-width of the band
+	ConcentrationX     float64 `json:"concentrationX"`     // C(delta) = 1 / (1 - e^(-delta/2))
+	ProjectedAPR       float64 `json:"projectedApr"`       // projected position APR in the band
+	LVRCostAPR         float64 `json:"lvrCostApr"`         // (sigma^2 / 8) * C(delta)
+	HedgeFrictionAPR   float64 `json:"hedgeFrictionApr"`   // annualized perp rebalancing fee drag
+	FundingAPR         float64 `json:"fundingApr"`         // annualized net perp funding (+ received, - paid)
+	NetEdgeAPR         float64 `json:"netEdgeApr"`         // ProjectedAPR + FundingAPR - LVRCostAPR - HedgeFrictionAPR
+	BreakevenSigma     float64 `json:"breakevenSigma"`     // max annualized vol this band's APR can sustain
+	VolHeadroom        float64 `json:"volHeadroom"`        // BreakevenSigma / sigma (> 1 means viable)
+	ExpectedDaysInBand float64 `json:"expectedDaysInBand"` // E[tau] = (delta / sigma)^2 * 365
+}
+
+// EvaluateBand computes the true mathematical viability of a concentrated LP
+// position in a band of log half-width delta with dynamic delta hedging.
+func EvaluateBand(
+	projectedBandAPR, sigma, delta, driftThreshold, avgExecFee, fundingAPR float64,
+) BandViability {
+	if delta <= 0 || sigma <= 0 {
+		return BandViability{}
+	}
+	c := ConcentrationFactor(delta)
+	lvrCost := LVRCost(sigma) * c
+
+	hedgeFrictionFactor := 0.10
+	if driftThreshold > 0 && avgExecFee > 0 {
+		hedgeFrictionFactor = math.Min(0.35, math.Max(0.03, (avgExecFee/driftThreshold)*12.0))
+	}
+	hedgeFriction := lvrCost * hedgeFrictionFactor
+
+	effectiveYield := projectedBandAPR + fundingAPR
+	netEdge := effectiveYield - lvrCost - hedgeFriction
+
+	var breakevenSigma float64
+	if effectiveYield > 0 {
+		breakevenSigma = math.Sqrt(8.0 * effectiveYield / (c * (1.0 + hedgeFrictionFactor)))
+	}
+
+	return BandViability{
+		Delta:              delta,
+		ConcentrationX:     c,
+		ProjectedAPR:       projectedBandAPR,
+		LVRCostAPR:         lvrCost,
+		HedgeFrictionAPR:   hedgeFriction,
+		FundingAPR:         fundingAPR,
+		NetEdgeAPR:         netEdge,
+		BreakevenSigma:     breakevenSigma,
+		VolHeadroom:        breakevenSigma / sigma,
+		ExpectedDaysInBand: (delta / sigma) * (delta / sigma) * 365.0,
+	}
+}
+
+// CrossImpliedVol computes the implied volatility of the ratio Token0/Token1
+// (e.g. WETH/cbBTC) from the standalone USD implied volatilities of each leg
+// and their correlation rho:
+//
+//	sigma_cross = sqrt(iv0^2 + iv1^2 - 2 * rho * iv0 * iv1)
+//
+// When rho is out of [-1, 1], DefaultCrossCorrelation (0.80) is used.
+func CrossImpliedVol(iv0, iv1, rho float64) float64 {
+	if iv0 <= 0 {
+		return iv1
+	}
+	if iv1 <= 0 {
+		return iv0
+	}
+	if rho < -1.0 || rho > 1.0 {
+		rho = DefaultCrossCorrelation
+	}
+	variance := iv0*iv0 + iv1*iv1 - 2.0*rho*iv0*iv1
+	if variance <= 0 {
+		return 0
+	}
+	return math.Sqrt(variance)
+}
+
+// OptimalRangePlan describes the recommended range bounds and perp margin
+// allocation for a concentrated LP + delta-hedge deployment.
+type OptimalRangePlan struct {
+	DeltaHalfWidth       float64 `json:"deltaHalfWidth"`       // log half-width delta
+	LowerPct             float64 `json:"lowerPct"`             // e.g. -0.058 (-5.8%)
+	UpperPct             float64 `json:"upperPct"`             // e.g. +0.062 (+6.2%)
+	LowerPrice           float64 `json:"lowerPrice"`           // lower notional price
+	UpperPrice           float64 `json:"upperPrice"`           // upper notional price
+	ShortNotionalRatio   float64 `json:"shortNotionalRatio"`   // 0.50 for Token/Stable, 1.00 for Token/Token
+	RecommendedMarginUSD float64 `json:"recommendedMarginUsd"` // perp margin to survive +maxAdversePumpPct
+}
+
+// BuildRangePlan sizes a [LowerPrice, UpperPrice] band from volatility sigma
+// over horizonDays at confidence multiplier kSigma, and computes the recommended
+// Binance futures margin buffer to avoid short liquidation during a pump.
+func BuildRangePlan(
+	spotPrice, sigma, horizonDays, kSigma, lpDepositUSD float64,
+	bothLegsVolatile bool,
+	maxAdversePumpPct float64,
+) OptimalRangePlan {
+	if sigma <= 0 || horizonDays <= 0 {
+		return OptimalRangePlan{}
+	}
+	if kSigma <= 0 {
+		kSigma = 1.0
+	}
+	if maxAdversePumpPct <= 0 {
+		maxAdversePumpPct = 0.40
+	}
+
+	delta := kSigma * sigma * math.Sqrt(horizonDays/365.0)
+	lowerPct := math.Exp(-delta) - 1.0
+	upperPct := math.Exp(delta) - 1.0
+
+	shortRatio := 0.50
+	if bothLegsVolatile {
+		shortRatio = 1.00
+	}
+	marginUSD := lpDepositUSD * shortRatio * (maxAdversePumpPct + 0.05)
+
+	return OptimalRangePlan{
+		DeltaHalfWidth:       delta,
+		LowerPct:             lowerPct,
+		UpperPct:             upperPct,
+		LowerPrice:           spotPrice * math.Exp(-delta),
+		UpperPrice:           spotPrice * math.Exp(delta),
+		ShortNotionalRatio:   shortRatio,
+		RecommendedMarginUSD: marginUSD,
+	}
+}

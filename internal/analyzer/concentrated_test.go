@@ -230,3 +230,27 @@ func TestMethodsHeadroomAndTimeInRange(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateBandCrossVolAndRangePlan(t *testing.T) {
+	// CrossImpliedVol: ETH IV = 55.1%, BTC IV = 38.0%, rho = 0.80 -> ~33.61%.
+	cross := CrossImpliedVol(0.551, 0.380, 0.80)
+	if math.Abs(cross-0.33611) > 1e-3 {
+		t.Fatalf("CrossImpliedVol(0.551, 0.380, 0.80) = %.5f, want ≈0.33611", cross)
+	}
+
+	// EvaluateBand on WETH/cbBTC Wide (±3.9%, APR=143.5%, sigma=33.61%):
+	v := EvaluateBand(1.435, cross, 0.039, 0.03, 0.0003, 0)
+	if !(v.NetEdgeAPR > 0.50 && v.BreakevenSigma > cross && v.VolHeadroom > 1.0) {
+		t.Fatalf("expected positive net edge and headroom > 1, got %+v", v)
+	}
+
+	// BuildRangePlan: Token/Token uses 100% short ratio, Token/Stable uses 50%.
+	planPair := BuildRangePlan(0.02769, cross, 9.5, 1.0, 10_000, true, 0.40)
+	planStable := BuildRangePlan(73336, 0.380, 9.5, 1.0, 10_000, false, 0.40)
+	if planPair.ShortNotionalRatio != 1.0 || planStable.ShortNotionalRatio != 0.5 {
+		t.Fatalf("unexpected short ratios: pair=%v stable=%v", planPair.ShortNotionalRatio, planStable.ShortNotionalRatio)
+	}
+	if math.Abs(planPair.RecommendedMarginUSD-2*planStable.RecommendedMarginUSD) > 1e-6 {
+		t.Fatalf("expected pair margin (%v) to be 2x stable margin (%v)", planPair.RecommendedMarginUSD, planStable.RecommendedMarginUSD)
+	}
+}
